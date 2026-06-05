@@ -12,14 +12,14 @@ MAX_PIANO_NOTE = 108
 CONFIG_FILE = ".synthermia_last_config.json"
 
 
-@dataclass
+@dataclass(slots=True)
 class MidiHeader:
     fmt: int
     ntrks: int
     division: int
 
 
-@dataclass
+@dataclass(slots=True)
 class RawEvent:
     tick: int
     order: int
@@ -62,7 +62,7 @@ class MidiTrackSummary:
     instrument_name: str = ""
 
 
-@dataclass
+@dataclass(slots=True)
 class _AudioEvent:
     time_sec: float
     order: int  # 0=CC, 1=note-off, 2=note-on
@@ -74,7 +74,7 @@ class _AudioEvent:
     value: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class _LiveMidiEvent:
     time_sec: float
     kind: str  # "note_on" | "note_off" | "cc"

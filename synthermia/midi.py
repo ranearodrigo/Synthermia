@@ -356,6 +356,15 @@ def build_note_spans(
 ) -> List[NoteSpan]:
     tempo_segments = build_tempo_segments(events, ticks_per_qn)
     mode = normalize_stuck_note_fix_mode(stuck_note_fix_mode)
+    tick_sec_cache: Dict[int, float] = {}
+
+    def tick_sec(tick: int) -> float:
+        cached = tick_sec_cache.get(tick)
+        if cached is not None:
+            return cached
+        sec = tick_to_sec(tick, tempo_segments, ticks_per_qn)
+        tick_sec_cache[tick] = sec
+        return sec
 
     on_map: Dict[Tuple[int, int, int], deque[Tuple[int, int]]] = defaultdict(deque)
     spans: List[NoteSpan] = []
@@ -384,8 +393,8 @@ def build_note_spans(
             spans.append(
                 NoteSpan(
                     note=ev.note,
-                    start=tick_to_sec(start_tick, tempo_segments, ticks_per_qn),
-                    end=tick_to_sec(ev.tick, tempo_segments, ticks_per_qn),
+                    start=tick_sec(start_tick),
+                    end=tick_sec(ev.tick),
                     velocity=vel,
                     channel=ev.channel,
                     track=track_idx,
