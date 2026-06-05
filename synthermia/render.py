@@ -348,6 +348,7 @@ def render_frame(
     pedal_black_fall_mask = [[False for _ in range(cols)] for _ in range(play_rows)]
     pedal_fall_alpha_scale = [[0.0 for _ in range(cols)] for _ in range(play_rows)]
     measure_line_mask = [[False for _ in range(cols)] for _ in range(play_rows)]
+    note_density = [[0 for _ in range(cols)] for _ in range(play_rows)]
     default_white_note = (255, 80, 80)
     pressed_mode = normalize_pressed_key_color_mode(pressed_key_color_mode)
     term_bg_rgb = terminal_bg_rgb or detect_terminal_bg_rgb()
@@ -473,6 +474,36 @@ def render_frame(
     visible_tracks_by_note: Dict[int, List[int]] = {}
     active_weighted_colors_by_note: Dict[int, List[Tuple[Tuple[int, int, int], float]]] = {}
     active_notes = set()
+    packed_span_mode = bool(spans) and isinstance(spans[0], tuple)
+    density_mode = packed_span_mode and len(spans) >= max(512, play_rows * max(12, cols // 3))
+
+    def white_density_char(level: int) -> str:
+        if level <= 1:
+            return "·"
+        if level == 2:
+            return "░"
+        if level == 3:
+            return "▒"
+        return note_white_glyph
+
+    def black_density_chunk(level: int, width: int) -> str:
+        if level <= 1:
+            mid = note_pedal_black_mid
+            left = note_pedal_black_left
+            right = note_pedal_black_right
+        elif level == 2:
+            mid = note_pedal_black_mid
+            left = note_black_left
+            right = note_black_right
+        else:
+            mid = note_black_mid
+            left = note_black_left
+            right = note_black_right
+        if width <= 1:
+            return mid
+        if width == 2:
+            return left + right
+        return left + (mid * (width - 2)) + right
 
     def span_bounds(start_val: float, end_val: float) -> Optional[Tuple[int, int]]:
         if direction == "up":
@@ -632,7 +663,6 @@ def render_frame(
                                 pedal_fall_alpha_scale[y][xx], pedal_cell_alpha
                             )
 
-    packed_span_mode = bool(spans) and isinstance(spans[0], tuple)
     for sp in spans:
         if packed_span_mode:
             sp_note, sp_start, sp_end, sp_velocity, _sp_channel, sp_track = sp  # type: ignore[misc]
@@ -669,12 +699,23 @@ def render_frame(
                     for dx in range(white_w):
                         xx = x + dx
                         if 0 <= xx < cols:
-                            canvas[y][xx] = note_white_glyph
-                            white_fall_track[y][xx] = trk
-                            white_fall_velocity[y][xx] = vel
-                            white_fall_alpha_scale[y][xx] = 1.0
-                            note_track[y][xx] = trk
-                            note_velocity[y][xx] = vel
+                            if density_mode:
+                                dens = min(4, note_density[y][xx] + 1)
+                                note_density[y][xx] = dens
+                                canvas[y][xx] = white_density_char(dens)
+                                if vel >= note_velocity[y][xx]:
+                                    white_fall_track[y][xx] = trk
+                                    white_fall_velocity[y][xx] = vel
+                                    white_fall_alpha_scale[y][xx] = 1.0
+                                    note_track[y][xx] = trk
+                                    note_velocity[y][xx] = vel
+                            else:
+                                canvas[y][xx] = note_white_glyph
+                                white_fall_track[y][xx] = trk
+                                white_fall_velocity[y][xx] = vel
+                                white_fall_alpha_scale[y][xx] = 1.0
+                                note_track[y][xx] = trk
+                                note_velocity[y][xx] = vel
                             black_fall_mask[y][xx] = False
                             pedal_fall_mask[y][xx] = False
                             pedal_black_fall_mask[y][xx] = False
@@ -682,20 +723,24 @@ def render_frame(
             bw = black_fall_w
             x0 = x + max(0, (black_key_w - bw) // 2)
             vel = max(1, min(127, sp_velocity))
-            if bw <= 1:
-                black_chunk = note_black_mid
-            elif bw == 2:
-                black_chunk = note_black_left + note_black_right
-            else:
-                black_chunk = note_black_left + (note_black_mid * (bw - 2)) + note_black_right
+            black_chunk = black_density_chunk(4, bw)
             for y in range(y1, y2 + 1):
                 if 0 <= y < play_rows:
                     for dx in range(bw):
                         xx = x0 + dx
                         if 0 <= xx < cols:
-                            canvas[y][xx] = black_chunk[dx]
-                            note_track[y][xx] = trk
-                            note_velocity[y][xx] = vel
+                            if density_mode:
+                                dens = min(4, note_density[y][xx] + 1)
+                                note_density[y][xx] = dens
+                                chunk = black_density_chunk(dens, bw)
+                                canvas[y][xx] = chunk[dx]
+                                if vel >= note_velocity[y][xx]:
+                                    note_track[y][xx] = trk
+                                    note_velocity[y][xx] = vel
+                            else:
+                                canvas[y][xx] = black_chunk[dx]
+                                note_track[y][xx] = trk
+                                note_velocity[y][xx] = vel
                             black_fall_mask[y][xx] = True
                             pedal_fall_mask[y][xx] = False
                             pedal_black_fall_mask[y][xx] = False
