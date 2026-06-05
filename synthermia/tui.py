@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import curses
 import os
+import random
 import shutil
 import subprocess
 import tempfile
@@ -1668,6 +1669,54 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                         changed += 1
             return matched, changed
 
+        def randomizable_instrument_options() -> List[str]:
+            default_sf = str(state.get("soundfont", "")).strip()
+            soundfont_list = _normalize_saved_soundfont_library(
+                state.get("soundfonts", []),
+                primary_soundfont=default_sf,
+            )
+            valid_soundfonts = {
+                _soundfont_identity(sf)
+                for sf in soundfont_list
+                if sf and os.path.exists(sf)
+            }
+            if not valid_soundfonts:
+                return []
+
+            options: List[str] = []
+            seen: set[Tuple[str, int, int]] = set()
+            for opt in instrument_options:
+                sf, bank, program = parse_instrument_spec(opt, (0, 0), default_sf)
+                sf_key = _soundfont_identity(sf)
+                if not sf_key or sf_key not in valid_soundfonts:
+                    continue
+                ident = (sf_key, bank, program)
+                if ident in seen:
+                    continue
+                seen.add(ident)
+                options.append(opt)
+            return options
+
+        def random_assign_track_instruments() -> Tuple[int, int]:
+            choices = randomizable_instrument_options()
+            if not choices:
+                return 0, 0
+
+            changed = 0
+            for tr in track_entries:
+                tkey = str(tr.index)
+                picked = random.choice(choices)
+                before = track_instr.get(tkey)
+                if picked == default_instrument:
+                    if tkey in track_instr:
+                        track_instr.pop(tkey, None)
+                        changed += 1
+                else:
+                    if before != picked:
+                        track_instr[tkey] = picked
+                        changed += 1
+            return len(track_entries), changed
+
         def rgb_to_term_color(rgb: Tuple[int, int, int]) -> int:
             r, g, b = rgb
             colors_count = int(getattr(curses, "COLORS", 0) or 0)
@@ -1729,7 +1778,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             stdscr.addstr(0, max(2, (w - len(title)) // 2), title, curses.A_BOLD)
             midi_name = _fmt_choice(str(state["midi"]))
             stdscr.addstr(1, 2, f"MIDI: {midi_name}"[: max(1, w - 4)])
-            help_line = "Up/Down move  Enter edit selected  Left/Right nudge volume  m auto-match  r reset track  a reset all  s save  Esc cancel"
+            help_line = "Up/Down move  Enter edit selected  Left/Right nudge volume  m auto-match  z randomize  r reset track  a reset all  s save  Esc cancel"
             stdscr.addstr(2, 2, help_line[: max(1, w - 4)])
             if status_msg:
                 stdscr.addstr(3, 2, status_msg[: max(1, w - 4)], curses.A_DIM)
@@ -1832,6 +1881,14 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                     status_msg = "No track instrument names matched any SoundFont preset."
                 else:
                     status_msg = f"Auto-matched {matched} tracks from MIDI names ({changed} overrides changed)."
+                continue
+
+            if k in (ord("z"), ord("Z")):
+                randomized, changed = random_assign_track_instruments()
+                if randomized <= 0:
+                    status_msg = "No selectable SoundFont presets available for random assignment."
+                else:
+                    status_msg = f"Randomized instruments for {randomized} tracks ({changed} overrides changed)."
                 continue
 
             if k in (curses.KEY_LEFT, curses.KEY_RIGHT) and sub_row == 1:
