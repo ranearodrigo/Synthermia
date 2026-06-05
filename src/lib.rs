@@ -35,13 +35,6 @@ struct RawEvent {
 }
 
 #[derive(Clone, Copy)]
-struct TempoSegment {
-    tick: u64,
-    sec: f64,
-    tempo_us_per_qn: u32,
-}
-
-#[derive(Clone, Copy)]
 struct NativeSpan {
     note: u8,
     start: f64,
@@ -120,6 +113,13 @@ impl PartialOrd for MergeCursor {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
+}
+
+#[derive(Clone, Copy)]
+struct ActiveNote {
+    start_tick: u64,
+    start_sec: f64,
+    velocity: u8,
 }
 
 impl NativePackedPlaybackSource {
@@ -456,14 +456,11 @@ fn load_packed_playback_source_native(
     flip_hi: Option<u8>,
 ) -> PyResult<NativePackedPlaybackSource> {
     let (ticks_per_qn, events) = parse_midi_file(midi_path)?;
-    let tempo_segments = build_tempo_segments(&events, ticks_per_qn);
-    let (mut spans, note_diag) =
-        build_note_spans(&events, &tempo_segments, ticks_per_qn, stuck_note_fix_mode);
+    let (mut spans, controls, measure_times, note_diag) =
+        build_native_rows_streaming(&events, ticks_per_qn, stuck_note_fix_mode);
     if midi_flip {
         apply_midi_flip(&mut spans, flip_lo, flip_hi);
     }
-    let controls = build_control_events(&events, &tempo_segments, ticks_per_qn);
-    let measure_times = build_measure_times(&events, &tempo_segments, ticks_per_qn);
     Ok(NativePackedPlaybackSource::from_rows(
         spans,
         controls,
@@ -690,6 +687,7 @@ fn parse_midi_bytes(data: &[u8]) -> PyResult<(u16, Vec<RawEvent>)> {
         }
 
         i = trk_end;
+        events.sort_by(|a, b| a.tick.cmp(&b.tick).then_with(|| a.order.cmp(&b.order)));
         track_events.push(events);
     }
 
@@ -730,107 +728,112 @@ fn merge_track_events(track_events: Vec<Vec<RawEvent>>) -> Vec<RawEvent> {
     merged
 }
 
-fn build_tempo_segments(events: &[RawEvent], ticks_per_qn: u16) -> Vec<TempoSegment> {
-    let mut tempos: Vec<(u64, u32)> = vec![(0, DEFAULT_TEMPO_US_PER_QN)];
-    for ev in events {
-        if ev.kind == EventKind::Tempo {
-            if let Some(tempo) = ev.tempo_us_per_qn {
-                tempos.push((ev.tick, tempo));
-            }
-        }
-    }
-    tempos.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut dedup: Vec<(u64, u32)> = Vec::new();
-    for (tick, tempo) in tempos {
-        if let Some(last) = dedup.last_mut() {
-            if last.0 == tick {
-                *last = (tick, tempo);
-                continue;
-            }
-        }
-        dedup.push((tick, tempo));
-    }
-
-    let mut segments = Vec::with_capacity(dedup.len());
-    let mut cur_tick = 0u64;
-    let mut cur_sec = 0.0f64;
-    let mut cur_tempo = dedup[0].1;
-    segments.push(TempoSegment {
-        tick: cur_tick,
-        sec: cur_sec,
-        tempo_us_per_qn: cur_tempo,
-    });
-
-    for (nxt_tick, nxt_tempo) in dedup.into_iter().skip(1) {
-        let dt = nxt_tick.saturating_sub(cur_tick);
-        cur_sec += (dt as f64) * ((cur_tempo as f64) / 1_000_000.0) / (ticks_per_qn as f64);
-        cur_tick = nxt_tick;
-        cur_tempo = nxt_tempo;
-        segments.push(TempoSegment {
-            tick: cur_tick,
-            sec: cur_sec,
-            tempo_us_per_qn: cur_tempo,
-        });
-    }
-    segments
-}
-
-fn tick_to_sec(tick: u64, tempo_segments: &[TempoSegment], ticks_per_qn: u16) -> f64 {
-    let mut lo = 0usize;
-    let mut hi = tempo_segments.len().saturating_sub(1);
-    while lo < hi {
-        let mid = (lo + hi + 1) / 2;
-        if tempo_segments[mid].tick <= tick {
-            lo = mid;
-        } else {
-            hi = mid.saturating_sub(1);
-        }
-    }
-    let seg = tempo_segments[lo];
-    seg.sec
-        + ((tick.saturating_sub(seg.tick)) as f64)
-            * ((seg.tempo_us_per_qn as f64) / 1_000_000.0)
-            / (ticks_per_qn as f64)
-}
-
-fn normalize_stuck_note_fix_mode(value: &str) -> &'static str {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "off" | "none" | "disable" | "disabled" => "off",
-        "lifo" | "stack" | "recent" | "newest" => "lifo",
-        "auto" | "on" | "enabled" | "retrigger" | "trim" | "guard" => "auto",
-        _ => "off",
-    }
-}
-
-fn build_note_spans(
+fn build_native_rows_streaming(
     events: &[RawEvent],
-    tempo_segments: &[TempoSegment],
     ticks_per_qn: u16,
     stuck_note_fix_mode: &str,
-) -> (Vec<NativeSpan>, NoteDiagnostics) {
+) -> (Vec<NativeSpan>, Vec<NativeControl>, Vec<f64>, NoteDiagnostics) {
+    if ticks_per_qn == 0 {
+        return (
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            NoteDiagnostics {
+                stuck_note_fix_mode: 0,
+                overlap_fixes: 0,
+                orphan_note_offs: 0,
+                remaining_unmatched_note_ons: 0,
+            },
+        );
+    }
+
     let mode = normalize_stuck_note_fix_mode(stuck_note_fix_mode);
-    let mut tick_sec_cache: HashMap<u64, f64> = HashMap::new();
-    let mut on_map: HashMap<(u32, u8, u8), VecDeque<(u64, u8)>> = HashMap::new();
     let mut spans: Vec<NativeSpan> = Vec::new();
+    let mut controls: Vec<NativeControl> = Vec::new();
+    let mut measure_times: Vec<f64> = vec![0.0];
+    let mut on_map: HashMap<(u32, u8, u8), VecDeque<ActiveNote>> = HashMap::new();
     let mut overlap_fixes = 0u64;
     let mut orphan_note_offs = 0u64;
+    let mut max_tick = 0u64;
 
-    for ev in events {
-        match ev.kind {
+    let mut current_tick = 0u64;
+    let mut current_sec = 0.0f64;
+    let mut tempo_us_per_qn = DEFAULT_TEMPO_US_PER_QN;
+    let mut sec_per_tick = (tempo_us_per_qn as f64) / 1_000_000.0 / (ticks_per_qn as f64);
+
+    let mut current_bar_ticks = bar_ticks_for_signature(4, 4, ticks_per_qn);
+    let mut next_measure_tick = current_bar_ticks;
+
+    for event in events {
+        max_tick = max_tick.max(event.tick);
+
+        while next_measure_tick <= event.tick {
+            let measure_sec =
+                current_sec + ((next_measure_tick.saturating_sub(current_tick)) as f64) * sec_per_tick;
+            if measure_times
+                .last()
+                .map(|last| (last - measure_sec).abs() > 1e-12)
+                .unwrap_or(true)
+            {
+                measure_times.push(measure_sec);
+            }
+            next_measure_tick = next_measure_tick.saturating_add(current_bar_ticks.max(1));
+        }
+
+        current_sec += ((event.tick.saturating_sub(current_tick)) as f64) * sec_per_tick;
+        current_tick = event.tick;
+
+        match event.kind {
+            EventKind::Tempo => {
+                if let Some(tempo) = event.tempo_us_per_qn {
+                    tempo_us_per_qn = tempo.max(1);
+                    sec_per_tick =
+                        (tempo_us_per_qn as f64) / 1_000_000.0 / (ticks_per_qn as f64);
+                }
+            }
+            EventKind::TimeSignature => {
+                let numer = event.time_sig_numerator.unwrap_or(4).max(1);
+                let denom = event.time_sig_denominator.unwrap_or(4).max(1);
+                if measure_times
+                    .last()
+                    .map(|last| (last - current_sec).abs() > 1e-12)
+                    .unwrap_or(true)
+                {
+                    measure_times.push(current_sec);
+                }
+                current_bar_ticks = bar_ticks_for_signature(numer, denom, ticks_per_qn);
+                next_measure_tick = current_tick.saturating_add(current_bar_ticks);
+            }
+            EventKind::ControlChange => {
+                if let (Some(channel), Some(controller), Some(value)) =
+                    (event.channel, event.controller, event.value)
+                {
+                    controls.push(NativeControl {
+                        time_sec: current_sec,
+                        channel: channel.min(15),
+                        controller,
+                        value,
+                        track: event.track,
+                    });
+                }
+            }
             EventKind::NoteOn => {
                 if let (Some(note), Some(channel), Some(velocity)) =
-                    (ev.note, ev.channel, ev.velocity)
+                    (event.note, event.channel, event.velocity)
                 {
                     on_map
-                        .entry((ev.track, channel, note))
+                        .entry((event.track, channel, note))
                         .or_default()
-                        .push_back((ev.tick, velocity));
+                        .push_back(ActiveNote {
+                            start_tick: event.tick,
+                            start_sec: current_sec,
+                            velocity,
+                        });
                 }
             }
             EventKind::NoteOff => {
-                if let (Some(note), Some(channel)) = (ev.note, ev.channel) {
-                    let Some(queue) = on_map.get_mut(&(ev.track, channel, note)) else {
+                if let (Some(note), Some(channel)) = (event.note, event.channel) {
+                    let Some(queue) = on_map.get_mut(&(event.track, channel, note)) else {
                         orphan_note_offs += 1;
                         continue;
                     };
@@ -840,129 +843,73 @@ fn build_note_spans(
                     } else {
                         queue.pop_front()
                     };
-                    let Some((start_tick, velocity)) = start else {
+                    let Some(start_note) = start else {
                         orphan_note_offs += 1;
                         continue;
                     };
-                    if ev.tick <= start_tick {
+                    if event.tick <= start_note.start_tick {
                         continue;
                     }
-                    let start_sec = *tick_sec_cache
-                        .entry(start_tick)
-                        .or_insert_with(|| tick_to_sec(start_tick, tempo_segments, ticks_per_qn));
-                    let end_sec = *tick_sec_cache
-                        .entry(ev.tick)
-                        .or_insert_with(|| tick_to_sec(ev.tick, tempo_segments, ticks_per_qn));
                     spans.push(NativeSpan {
                         note,
-                        start: start_sec,
-                        end: end_sec,
-                        velocity,
+                        start: start_note.start_sec,
+                        end: current_sec,
+                        velocity: start_note.velocity,
                         channel,
-                        track: ev.track,
+                        track: event.track,
                     });
                 }
             }
-            _ => {}
         }
+
     }
+
+    while next_measure_tick <= max_tick {
+        let measure_sec =
+            current_sec + ((next_measure_tick.saturating_sub(current_tick)) as f64) * sec_per_tick;
+        if measure_times
+            .last()
+            .map(|last| (last - measure_sec).abs() > 1e-12)
+            .unwrap_or(true)
+        {
+            measure_times.push(measure_sec);
+        }
+        next_measure_tick = next_measure_tick.saturating_add(current_bar_ticks.max(1));
+    }
+
     let remaining_unmatched_note_ons = on_map.values().map(|q| q.len() as u64).sum();
-    let note_diag = NoteDiagnostics {
-        stuck_note_fix_mode: match mode {
-            "auto" => 1,
-            "lifo" => 2,
-            _ => 0,
+    spans.shrink_to_fit();
+    controls.shrink_to_fit();
+    measure_times.shrink_to_fit();
+
+    (
+        spans,
+        controls,
+        measure_times,
+        NoteDiagnostics {
+            stuck_note_fix_mode: match mode {
+                "auto" => 1,
+                "lifo" => 2,
+                _ => 0,
+            },
+            overlap_fixes,
+            orphan_note_offs,
+            remaining_unmatched_note_ons,
         },
-        overlap_fixes,
-        orphan_note_offs,
-        remaining_unmatched_note_ons,
-    };
-    (spans, note_diag)
+    )
 }
 
-fn build_control_events(
-    events: &[RawEvent],
-    tempo_segments: &[TempoSegment],
-    ticks_per_qn: u16,
-) -> Vec<NativeControl> {
-    let mut controls = Vec::new();
-    for ev in events {
-        if ev.kind != EventKind::ControlChange {
-            continue;
-        }
-        let (Some(channel), Some(controller), Some(value)) = (ev.channel, ev.controller, ev.value) else {
-            continue;
-        };
-        controls.push(NativeControl {
-            time_sec: tick_to_sec(ev.tick, tempo_segments, ticks_per_qn),
-            channel: channel.min(15),
-            controller,
-            value,
-            track: ev.track,
-        });
-    }
-    controls
+fn bar_ticks_for_signature(numer: u32, denom: u32, ticks_per_qn: u16) -> u64 {
+    (((ticks_per_qn as f64) * 4.0 * (numer as f64) / (denom as f64)).round() as u64).max(1)
 }
 
-fn build_measure_times(
-    events: &[RawEvent],
-    tempo_segments: &[TempoSegment],
-    ticks_per_qn: u16,
-) -> Vec<f64> {
-    if ticks_per_qn == 0 {
-        return Vec::new();
+fn normalize_stuck_note_fix_mode(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" | "disable" | "disabled" => "off",
+        "lifo" | "stack" | "recent" | "newest" => "lifo",
+        "auto" | "on" | "enabled" | "retrigger" | "trim" | "guard" => "auto",
+        _ => "off",
     }
-    let max_tick = events.iter().map(|ev| ev.tick).max().unwrap_or(0);
-
-    let mut sig_changes: Vec<(u64, u32, u32)> = vec![(0, 4, 4)];
-    for ev in events {
-        if ev.kind != EventKind::TimeSignature {
-            continue;
-        }
-        let numer = ev.time_sig_numerator.unwrap_or(4);
-        let denom = ev.time_sig_denominator.unwrap_or(4);
-        if numer > 0 && denom > 0 {
-            sig_changes.push((ev.tick, numer, denom));
-        }
-    }
-    sig_changes.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut dedup: Vec<(u64, u32, u32)> = Vec::new();
-    for item in sig_changes {
-        if let Some(last) = dedup.last_mut() {
-            if last.0 == item.0 {
-                *last = item;
-                continue;
-            }
-        }
-        dedup.push(item);
-    }
-
-    let mut measure_ticks: Vec<u64> = Vec::new();
-    for (idx, (start_tick, numer, denom)) in dedup.iter().copied().enumerate() {
-        let end_tick = dedup
-            .get(idx + 1)
-            .map(|item| item.0)
-            .unwrap_or(max_tick.saturating_add(1));
-        if end_tick <= start_tick {
-            continue;
-        }
-        let bar_ticks = (((ticks_per_qn as f64) * 4.0 * (numer as f64) / (denom as f64)).round()
-            as u64)
-            .max(1);
-        let mut tick = start_tick;
-        while tick < end_tick {
-            measure_ticks.push(tick);
-            tick = tick.saturating_add(bar_ticks);
-        }
-    }
-
-    measure_ticks.sort_unstable();
-    measure_ticks.dedup();
-    measure_ticks
-        .into_iter()
-        .map(|tick| tick_to_sec(tick, tempo_segments, ticks_per_qn))
-        .collect()
 }
 
 fn apply_midi_flip(spans: &mut [NativeSpan], flip_lo: Option<u8>, flip_hi: Option<u8>) {
