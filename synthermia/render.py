@@ -27,6 +27,7 @@ def is_white(note: int) -> bool:
     return (note % 12) in WHITE_PCS
 
 
+@lru_cache(maxsize=None)
 def count_whites_before(note: int) -> int:
     c = 0
     for n in range(MIN_PIANO_NOTE, note):
@@ -35,19 +36,23 @@ def count_whites_before(note: int) -> int:
     return c
 
 
+@lru_cache(maxsize=None)
 def white_key_width(x_scale: int) -> int:
     return max(2, 2 * x_scale)
 
 
+@lru_cache(maxsize=None)
 def black_fall_width(x_scale: int) -> int:
     # Match falling black-note width to the black key width at all scales.
     return black_key_width(x_scale)
 
 
+@lru_cache(maxsize=None)
 def black_key_width(x_scale: int) -> int:
     return max(2, 2 * x_scale)
 
 
+@lru_cache(maxsize=None)
 def keyboard_row_counts(kb_y_scale: int, kb_black_extra: int) -> Tuple[int, int, int]:
     s = max(1, kb_y_scale)
     extra = max(0, kb_black_extra)
@@ -56,6 +61,7 @@ def keyboard_row_counts(kb_y_scale: int, kb_black_extra: int) -> Tuple[int, int,
     return black_rows, white_rows, black_rows + white_rows
 
 
+@lru_cache(maxsize=None)
 def note_x(note: int, x_scale: int) -> int:
     w = white_key_width(x_scale)
     if is_white(note):
@@ -69,6 +75,7 @@ def note_x(note: int, x_scale: int) -> int:
     return count_whites_before(left) * w + max(1, x_scale)
 
 
+@lru_cache(maxsize=None)
 def keyboard_width(note_lo: int, note_hi: int, x_scale: int) -> int:
     max_x = 0
     for n in range(note_lo, note_hi + 1):
@@ -463,6 +470,7 @@ def render_frame(
     active_tracks_by_note: Dict[int, List[int]] = {}
     visible_tracks_by_note: Dict[int, List[int]] = {}
     active_weighted_colors_by_note: Dict[int, List[Tuple[Tuple[int, int, int], float]]] = {}
+    active_notes = set()
 
     def span_bounds(sp: NoteSpan) -> Optional[Tuple[int, int]]:
         if direction == "up":
@@ -631,6 +639,7 @@ def render_frame(
             continue
         trk = int(getattr(sp, "track", 0))
         if sp.start <= t <= sp.end:
+            active_notes.add(sp.note)
             add_unique_track(active_tracks_by_note, sp.note, trk)
             vel_w = max(1.0, float(max(1, int(getattr(sp, "velocity", 1)))))
             active_weighted_colors_by_note.setdefault(sp.note, []).append((track_white_rgb(trk), vel_w))
@@ -699,12 +708,6 @@ def render_frame(
                 if row[x] == " ":
                     row[x] = "_"
                     row_mask[x] = True
-
-    active_notes = set()
-    for sp in spans:
-        if sp.start <= t <= sp.end:
-            if note_lo <= sp.note <= note_hi:
-                active_notes.add(sp.note)
 
     black_start = play_rows
     white_start = black_start + black_rows
