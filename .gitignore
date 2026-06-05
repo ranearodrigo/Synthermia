@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+.synthermia_last_config.json
+.codex_tmp_extracts/
