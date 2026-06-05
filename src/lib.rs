@@ -2,7 +2,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::fs;
 
 const DEFAULT_TEMPO_US_PER_QN: u32 = 500_000;
@@ -95,6 +95,31 @@ struct DensityCell {
     velocity: u8,
     is_black: bool,
     density: u8,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct MergeCursor {
+    tick: u64,
+    order: u8,
+    track_idx: usize,
+    event_idx: usize,
+}
+
+impl Ord for MergeCursor {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .tick
+            .cmp(&self.tick)
+            .then_with(|| other.order.cmp(&self.order))
+            .then_with(|| other.track_idx.cmp(&self.track_idx))
+            .then_with(|| other.event_idx.cmp(&self.event_idx))
+    }
+}
+
+impl PartialOrd for MergeCursor {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl NativePackedPlaybackSource {
@@ -430,14 +455,15 @@ fn load_packed_playback_source_native(
     flip_lo: Option<u8>,
     flip_hi: Option<u8>,
 ) -> PyResult<NativePackedPlaybackSource> {
-    let (ticks_per_qn, mut events) = parse_midi_file(midi_path)?;
-    events.sort_by(|a, b| a.tick.cmp(&b.tick).then_with(|| a.order.cmp(&b.order)));
-    let (mut spans, note_diag) = build_note_spans(&events, ticks_per_qn, stuck_note_fix_mode);
+    let (ticks_per_qn, events) = parse_midi_file(midi_path)?;
+    let tempo_segments = build_tempo_segments(&events, ticks_per_qn);
+    let (mut spans, note_diag) =
+        build_note_spans(&events, &tempo_segments, ticks_per_qn, stuck_note_fix_mode);
     if midi_flip {
         apply_midi_flip(&mut spans, flip_lo, flip_hi);
     }
-    let controls = build_control_events(&events, ticks_per_qn);
-    let measure_times = build_measure_times(&events, ticks_per_qn);
+    let controls = build_control_events(&events, &tempo_segments, ticks_per_qn);
+    let measure_times = build_measure_times(&events, &tempo_segments, ticks_per_qn);
     Ok(NativePackedPlaybackSource::from_rows(
         spans,
         controls,
@@ -479,7 +505,7 @@ fn parse_midi_bytes(data: &[u8]) -> PyResult<(u16, Vec<RawEvent>)> {
     }
     i += hdr_len_usize - 6;
 
-    let mut events: Vec<RawEvent> = Vec::new();
+    let mut track_events: Vec<Vec<RawEvent>> = Vec::with_capacity(ntrks as usize);
     for track_idx in 0..ntrks {
         ensure_chunk(data, i, b"MTrk", "missing MTrk chunk")?;
         i += 4;
@@ -492,6 +518,7 @@ fn parse_midi_bytes(data: &[u8]) -> PyResult<(u16, Vec<RawEvent>)> {
             return Err(PyValueError::new_err("Invalid MIDI: truncated track chunk"));
         }
 
+        let mut events: Vec<RawEvent> = Vec::new();
         let mut abs_tick: u64 = 0;
         let mut running_status: Option<u8> = None;
 
@@ -663,9 +690,44 @@ fn parse_midi_bytes(data: &[u8]) -> PyResult<(u16, Vec<RawEvent>)> {
         }
 
         i = trk_end;
+        track_events.push(events);
     }
 
-    Ok((division, events))
+    Ok((division, merge_track_events(track_events)))
+}
+
+fn merge_track_events(track_events: Vec<Vec<RawEvent>>) -> Vec<RawEvent> {
+    let total_len: usize = track_events.iter().map(Vec::len).sum();
+    let mut merged = Vec::with_capacity(total_len);
+    let mut heap = BinaryHeap::new();
+
+    for (track_idx, events) in track_events.iter().enumerate() {
+        if let Some(event) = events.first() {
+            heap.push(MergeCursor {
+                tick: event.tick,
+                order: event.order,
+                track_idx,
+                event_idx: 0,
+            });
+        }
+    }
+
+    while let Some(cursor) = heap.pop() {
+        let events = &track_events[cursor.track_idx];
+        merged.push(events[cursor.event_idx].clone());
+
+        let next_idx = cursor.event_idx + 1;
+        if let Some(next) = events.get(next_idx) {
+            heap.push(MergeCursor {
+                tick: next.tick,
+                order: next.order,
+                track_idx: cursor.track_idx,
+                event_idx: next_idx,
+            });
+        }
+    }
+
+    merged
 }
 
 fn build_tempo_segments(events: &[RawEvent], ticks_per_qn: u16) -> Vec<TempoSegment> {
@@ -743,10 +805,10 @@ fn normalize_stuck_note_fix_mode(value: &str) -> &'static str {
 
 fn build_note_spans(
     events: &[RawEvent],
+    tempo_segments: &[TempoSegment],
     ticks_per_qn: u16,
     stuck_note_fix_mode: &str,
 ) -> (Vec<NativeSpan>, NoteDiagnostics) {
-    let tempo_segments = build_tempo_segments(events, ticks_per_qn);
     let mode = normalize_stuck_note_fix_mode(stuck_note_fix_mode);
     let mut tick_sec_cache: HashMap<u64, f64> = HashMap::new();
     let mut on_map: HashMap<(u32, u8, u8), VecDeque<(u64, u8)>> = HashMap::new();
@@ -787,10 +849,10 @@ fn build_note_spans(
                     }
                     let start_sec = *tick_sec_cache
                         .entry(start_tick)
-                        .or_insert_with(|| tick_to_sec(start_tick, &tempo_segments, ticks_per_qn));
+                        .or_insert_with(|| tick_to_sec(start_tick, tempo_segments, ticks_per_qn));
                     let end_sec = *tick_sec_cache
                         .entry(ev.tick)
-                        .or_insert_with(|| tick_to_sec(ev.tick, &tempo_segments, ticks_per_qn));
+                        .or_insert_with(|| tick_to_sec(ev.tick, tempo_segments, ticks_per_qn));
                     spans.push(NativeSpan {
                         note,
                         start: start_sec,
@@ -804,9 +866,6 @@ fn build_note_spans(
             _ => {}
         }
     }
-
-    spans.sort_by(|a, b| total_cmp_f64(a.start, b.start));
-
     let remaining_unmatched_note_ons = on_map.values().map(|q| q.len() as u64).sum();
     let note_diag = NoteDiagnostics {
         stuck_note_fix_mode: match mode {
@@ -821,8 +880,11 @@ fn build_note_spans(
     (spans, note_diag)
 }
 
-fn build_control_events(events: &[RawEvent], ticks_per_qn: u16) -> Vec<NativeControl> {
-    let tempo_segments = build_tempo_segments(events, ticks_per_qn);
+fn build_control_events(
+    events: &[RawEvent],
+    tempo_segments: &[TempoSegment],
+    ticks_per_qn: u16,
+) -> Vec<NativeControl> {
     let mut controls = Vec::new();
     for ev in events {
         if ev.kind != EventKind::ControlChange {
@@ -832,22 +894,24 @@ fn build_control_events(events: &[RawEvent], ticks_per_qn: u16) -> Vec<NativeCon
             continue;
         };
         controls.push(NativeControl {
-            time_sec: tick_to_sec(ev.tick, &tempo_segments, ticks_per_qn),
+            time_sec: tick_to_sec(ev.tick, tempo_segments, ticks_per_qn),
             channel: channel.min(15),
             controller,
             value,
             track: ev.track,
         });
     }
-    controls.sort_by(|a, b| total_cmp_f64(a.time_sec, b.time_sec));
     controls
 }
 
-fn build_measure_times(events: &[RawEvent], ticks_per_qn: u16) -> Vec<f64> {
+fn build_measure_times(
+    events: &[RawEvent],
+    tempo_segments: &[TempoSegment],
+    ticks_per_qn: u16,
+) -> Vec<f64> {
     if ticks_per_qn == 0 {
         return Vec::new();
     }
-    let tempo_segments = build_tempo_segments(events, ticks_per_qn);
     let max_tick = events.iter().map(|ev| ev.tick).max().unwrap_or(0);
 
     let mut sig_changes: Vec<(u64, u32, u32)> = vec![(0, 4, 4)];
@@ -897,7 +961,7 @@ fn build_measure_times(events: &[RawEvent], ticks_per_qn: u16) -> Vec<f64> {
     measure_ticks.dedup();
     measure_ticks
         .into_iter()
-        .map(|tick| tick_to_sec(tick, &tempo_segments, ticks_per_qn))
+        .map(|tick| tick_to_sec(tick, tempo_segments, ticks_per_qn))
         .collect()
 }
 
