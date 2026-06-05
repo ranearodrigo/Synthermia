@@ -207,6 +207,13 @@ impl NativePackedPlaybackSource {
         (0..self.note.len()).map(|idx| self.span_tuple(idx)).collect()
     }
 
+    fn track_ids(&self) -> Vec<u32> {
+        let mut tracks = self.track.clone();
+        tracks.sort_unstable();
+        tracks.dedup();
+        tracks
+    }
+
     fn control_tuples(&self) -> Vec<(f64, u8, u8, u8, u32)> {
         self.controls
             .iter()

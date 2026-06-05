@@ -157,6 +157,23 @@ def _build_track_program_map(
     track_instruments_raw: object,
     valid_pairs_by_sf: Optional[Dict[str, set[Tuple[int, int]]]] = None,
 ) -> Dict[int, Tuple[str, int, int]]:
+    tracks = sorted({int(getattr(sp, "track", 0)) for sp in spans})
+    return _build_track_program_map_for_tracks(
+        tracks,
+        default_pair,
+        default_soundfont,
+        track_instruments_raw,
+        valid_pairs_by_sf=valid_pairs_by_sf,
+    )
+
+
+def _build_track_program_map_for_tracks(
+    tracks: Sequence[int],
+    default_pair: Tuple[int, int],
+    default_soundfont: str,
+    track_instruments_raw: object,
+    valid_pairs_by_sf: Optional[Dict[str, set[Tuple[int, int]]]] = None,
+) -> Dict[int, Tuple[str, int, int]]:
     default_bank, default_prog = _clamp_instrument_pair(default_pair[0], default_pair[1])
     default_sf = str(default_soundfont or "").strip()
     default_sf_key = os.path.abspath(default_sf).lower() if default_sf else ""
@@ -184,9 +201,8 @@ def _build_track_program_map(
 
     default_bank, default_prog = _pick_pair_for_sf(default_sf_key, (default_bank, default_prog))
     overrides = _normalize_saved_track_map(track_instruments_raw)
-    tracks = sorted({int(getattr(sp, "track", 0)) for sp in spans})
     out: Dict[int, Tuple[str, int, int]] = {}
-    for tr in tracks:
+    for tr in sorted({int(track) for track in tracks}):
         override_txt = overrides.get(str(tr))
         if override_txt:
             ov_sf, b, p = parse_instrument_spec(override_txt, (default_bank, default_prog), default_sf)
@@ -207,10 +223,18 @@ def _build_track_color_map(
     spans: Sequence[NoteSpan],
     track_colors_raw: object,
 ) -> Dict[int, Tuple[int, int, int]]:
-    overrides = _normalize_saved_track_map(track_colors_raw)
     tracks = sorted({int(getattr(sp, "track", 0)) for sp in spans})
+    return _build_track_color_map_for_tracks(tracks, track_colors_raw)
+
+
+def _build_track_color_map_for_tracks(
+    tracks: Sequence[int],
+    track_colors_raw: object,
+) -> Dict[int, Tuple[int, int, int]]:
+    overrides = _normalize_saved_track_map(track_colors_raw)
     out: Dict[int, Tuple[int, int, int]] = {}
-    for i, tr in enumerate(tracks):
+    ordered_tracks = sorted({int(track) for track in tracks})
+    for i, tr in enumerate(ordered_tracks):
         default_rgb = default_track_color(i, len(tracks))
         override_txt = overrides.get(str(tr))
         if override_txt:

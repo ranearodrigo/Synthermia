@@ -41,7 +41,7 @@ def should_auto_use_packed(midi_path: str) -> bool:
 
 @dataclass
 class LoadedPlaybackData:
-    spans: List[NoteSpan]
+    spans: Optional[List[NoteSpan]]
     controls: List[ControlEvent]
     measure_times: List[float]
     note_diag: Dict[str, int]
@@ -61,6 +61,7 @@ class PackedPlaybackSource:
         source_kind: str,
         native_backend: bool,
         native_source: object | None = None,
+        track_ids: Optional[Sequence[int]] = None,
     ) -> None:
         span_list = list(spans)
         self._spans = span_list
@@ -70,8 +71,15 @@ class PackedPlaybackSource:
         self.source_kind = str(source_kind)
         self.native_backend = bool(native_backend)
         self._native_source = native_source
-        self.duration_sec = max((float(sp.end) for sp in span_list), default=0.0)
-        self.note_count = len(span_list)
+        self._track_ids = sorted({int(track) for track in (track_ids or [])})
+        if native_source is not None:
+            self.duration_sec = float(getattr(native_source, "duration_sec", 0.0))
+            self.note_count = int(getattr(native_source, "note_count", len(span_list)))
+        else:
+            self.duration_sec = max((float(sp.end) for sp in span_list), default=0.0)
+            self.note_count = len(span_list)
+            if not self._track_ids:
+                self._track_ids = sorted({int(getattr(sp, "track", 0)) for sp in span_list})
         if native_source is None:
             self.start_sec = array("d", (float(sp.start) for sp in span_list))
             self.end_sec = array("d", (float(sp.end) for sp in span_list))
@@ -118,22 +126,26 @@ class PackedPlaybackSource:
     def from_native(
         cls,
         native_source: object,
-        spans: Sequence[NoteSpan],
         controls: Sequence[ControlEvent],
         measure_times: Sequence[float],
         note_diag: Dict[str, int],
     ) -> "PackedPlaybackSource":
         return cls(
-            spans=spans,
+            spans=[],
             controls=controls,
             measure_times=measure_times,
             note_diag=note_diag,
             source_kind=str(getattr(native_source, "source_kind", "native-packed")),
             native_backend=bool(getattr(native_source, "native_backend", True)),
             native_source=native_source,
+            track_ids=[int(track) for track in native_source.track_ids()],
         )
 
     def to_note_spans(self) -> List[NoteSpan]:
+        if not self._spans and self._native_source is not None:
+            self._spans = _coerce_note_spans(self._native_source.note_tuples())
+            if not self._track_ids:
+                self._track_ids = sorted({int(getattr(sp, "track", 0)) for sp in self._spans})
         return list(self._spans)
 
     def visible_spans(self, t0: float, t1: float) -> List[NoteSpan]:
@@ -156,6 +168,11 @@ class PackedPlaybackSource:
         out = [self._spans[idx] for idx in self._by_end[j0:] if self.start_sec[idx] <= float(t1)]
         out.sort(key=lambda sp: (float(sp.start), float(sp.end), int(sp.note), int(getattr(sp, "channel", 0))))
         return out
+
+    def track_ids(self) -> List[int]:
+        if self._track_ids:
+            return list(self._track_ids)
+        return sorted({int(getattr(sp, "track", 0)) for sp in self.to_note_spans()})
 
 
 def _coerce_note_spans(rows: Sequence[Tuple[int, float, float, int, int, int]]) -> List[NoteSpan]:
@@ -196,7 +213,7 @@ def load_selected_playback_data(
     use_packed = engine_requested == "packed" or (
         engine_requested == "auto" and should_auto_use_packed(midi_path)
     )
-    spans: List[NoteSpan] = []
+    spans: Optional[List[NoteSpan]] = None
     controls: List[ControlEvent] = []
     measure_times: List[float] = []
     note_diag: Dict[str, int] = {}
@@ -220,7 +237,6 @@ def load_selected_playback_data(
                     flip_lo,
                     flip_hi,
                 )
-                native_spans = _coerce_note_spans(native_source.note_tuples())
                 native_controls = _coerce_control_events(native_source.control_tuples())
                 native_measure_times = [float(value) for value in native_source.measure_times()]
                 native_note_diag = {
@@ -228,12 +244,10 @@ def load_selected_playback_data(
                 }
                 packed_source = PackedPlaybackSource.from_native(
                     native_source=native_source,
-                    spans=native_spans,
                     controls=native_controls,
                     measure_times=native_measure_times,
                     note_diag=native_note_diag,
                 )
-                spans = native_spans
                 controls = native_controls
                 measure_times = native_measure_times
                 note_diag = native_note_diag

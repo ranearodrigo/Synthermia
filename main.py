@@ -348,8 +348,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         args.range = normalize_note_range_text(str(getattr(args, "range", "")))
         args.start = max(0.0, float(getattr(args, "start", 0.0)))
+        duration_sec = 0.0
         if spans:
             duration_sec = max(float(sp.end) for sp in spans)
+        elif loaded.packed_source is not None:
+            duration_sec = float(loaded.packed_source.duration_sec)
+        if duration_sec > 0.0:
             clamped_start = clamp_playback_start(
                 float(args.start),
                 duration_sec,
