@@ -60,6 +60,7 @@ class PackedPlaybackSource:
         note_diag: Dict[str, int],
         source_kind: str,
         native_backend: bool,
+        native_source: object | None = None,
     ) -> None:
         span_list = list(spans)
         self._spans = span_list
@@ -68,18 +69,31 @@ class PackedPlaybackSource:
         self.note_diag = dict(note_diag)
         self.source_kind = str(source_kind)
         self.native_backend = bool(native_backend)
+        self._native_source = native_source
         self.duration_sec = max((float(sp.end) for sp in span_list), default=0.0)
         self.note_count = len(span_list)
-        self.start_sec = array("d", (float(sp.start) for sp in span_list))
-        self.end_sec = array("d", (float(sp.end) for sp in span_list))
-        self.note = array("B", (int(sp.note) for sp in span_list))
-        self.velocity = array("B", (int(sp.velocity) for sp in span_list))
-        self.channel = array("B", (int(sp.channel) for sp in span_list))
-        self.track = array("I", (int(sp.track) for sp in span_list))
-        self._by_start = sorted(range(len(span_list)), key=lambda idx: (self.start_sec[idx], self.end_sec[idx], self.note[idx], self.channel[idx]))
-        self._by_end = sorted(range(len(span_list)), key=lambda idx: (self.end_sec[idx], self.start_sec[idx], self.note[idx], self.channel[idx]))
-        self._start_values = [self.start_sec[idx] for idx in self._by_start]
-        self._end_values = [self.end_sec[idx] for idx in self._by_end]
+        if native_source is None:
+            self.start_sec = array("d", (float(sp.start) for sp in span_list))
+            self.end_sec = array("d", (float(sp.end) for sp in span_list))
+            self.note = array("B", (int(sp.note) for sp in span_list))
+            self.velocity = array("B", (int(sp.velocity) for sp in span_list))
+            self.channel = array("B", (int(sp.channel) for sp in span_list))
+            self.track = array("I", (int(sp.track) for sp in span_list))
+            self._by_start = sorted(range(len(span_list)), key=lambda idx: (self.start_sec[idx], self.end_sec[idx], self.note[idx], self.channel[idx]))
+            self._by_end = sorted(range(len(span_list)), key=lambda idx: (self.end_sec[idx], self.start_sec[idx], self.note[idx], self.channel[idx]))
+            self._start_values = [self.start_sec[idx] for idx in self._by_start]
+            self._end_values = [self.end_sec[idx] for idx in self._by_end]
+        else:
+            self.start_sec = array("d")
+            self.end_sec = array("d")
+            self.note = array("B")
+            self.velocity = array("B")
+            self.channel = array("B")
+            self.track = array("I")
+            self._by_start = []
+            self._by_end = []
+            self._start_values = []
+            self._end_values = []
 
     @classmethod
     def from_python(
@@ -100,10 +114,41 @@ class PackedPlaybackSource:
             native_backend=native_backend,
         )
 
+    @classmethod
+    def from_native(
+        cls,
+        native_source: object,
+        spans: Sequence[NoteSpan],
+        controls: Sequence[ControlEvent],
+        measure_times: Sequence[float],
+        note_diag: Dict[str, int],
+    ) -> "PackedPlaybackSource":
+        return cls(
+            spans=spans,
+            controls=controls,
+            measure_times=measure_times,
+            note_diag=note_diag,
+            source_kind=str(getattr(native_source, "source_kind", "native-packed")),
+            native_backend=bool(getattr(native_source, "native_backend", True)),
+            native_source=native_source,
+        )
+
     def to_note_spans(self) -> List[NoteSpan]:
         return list(self._spans)
 
     def visible_spans(self, t0: float, t1: float) -> List[NoteSpan]:
+        if self._native_source is not None:
+            return [
+                NoteSpan(
+                    note=int(note),
+                    start=float(start),
+                    end=float(end),
+                    velocity=int(velocity),
+                    channel=int(channel),
+                    track=int(track),
+                )
+                for note, start, end, velocity, channel, track in self._native_source.visible_spans(float(t0), float(t1))
+            ]
         i1 = bisect_right(self._start_values, float(t1))
         j0 = bisect_left(self._end_values, float(t0))
         if i1 <= (len(self._by_end) - j0):
@@ -111,6 +156,33 @@ class PackedPlaybackSource:
         out = [self._spans[idx] for idx in self._by_end[j0:] if self.start_sec[idx] <= float(t1)]
         out.sort(key=lambda sp: (float(sp.start), float(sp.end), int(sp.note), int(getattr(sp, "channel", 0))))
         return out
+
+
+def _coerce_note_spans(rows: Sequence[Tuple[int, float, float, int, int, int]]) -> List[NoteSpan]:
+    return [
+        NoteSpan(
+            note=int(note),
+            start=float(start),
+            end=float(end),
+            velocity=int(velocity),
+            channel=int(channel),
+            track=int(track),
+        )
+        for note, start, end, velocity, channel, track in rows
+    ]
+
+
+def _coerce_control_events(rows: Sequence[Tuple[float, int, int, int, int]]) -> List[ControlEvent]:
+    return [
+        ControlEvent(
+            time_sec=float(time_sec),
+            channel=int(channel),
+            controller=int(controller),
+            value=int(value),
+            track=int(track),
+        )
+        for time_sec, channel, controller, value, track in rows
+    ]
 
 
 def load_selected_playback_data(
@@ -124,13 +196,10 @@ def load_selected_playback_data(
     use_packed = engine_requested == "packed" or (
         engine_requested == "auto" and should_auto_use_packed(midi_path)
     )
-
-    spans, controls, measure_times, note_diag = load_playback_source(
-        midi_path,
-        stuck_note_fix_mode=stuck_note_fix_mode,
-        midi_flip=midi_flip,
-        flip_bounds=flip_bounds,
-    )
+    spans: List[NoteSpan] = []
+    controls: List[ControlEvent] = []
+    measure_times: List[float] = []
+    note_diag: Dict[str, int] = {}
 
     packed_source: Optional[PackedPlaybackSource] = None
     engine_used = "python"
@@ -144,24 +213,55 @@ def load_selected_playback_data(
                 if flip_bounds is not None:
                     flip_lo = int(flip_bounds[0])
                     flip_hi = int(flip_bounds[1])
-                load_packed_playback_source_native(
+                native_source = load_packed_playback_source_native(
                     midi_path,
                     str(stuck_note_fix_mode),
                     bool(midi_flip),
                     flip_lo,
                     flip_hi,
                 )
+                native_spans = _coerce_note_spans(native_source.note_tuples())
+                native_controls = _coerce_control_events(native_source.control_tuples())
+                native_measure_times = [float(value) for value in native_source.measure_times()]
+                native_note_diag = {
+                    key: int(value) for key, value in dict(native_source.note_diag()).items()
+                }
+                packed_source = PackedPlaybackSource.from_native(
+                    native_source=native_source,
+                    spans=native_spans,
+                    controls=native_controls,
+                    measure_times=native_measure_times,
+                    note_diag=native_note_diag,
+                )
+                spans = native_spans
+                controls = native_controls
+                measure_times = native_measure_times
+                note_diag = native_note_diag
                 native_backend = True
             except Exception:
                 native_backend = False
         engine_used = "packed"
-        packed_source = PackedPlaybackSource.from_python(
-            spans,
-            controls,
-            measure_times,
-            note_diag,
-            source_kind="native-probed" if native_backend else "python-packed",
-            native_backend=native_backend,
+        if packed_source is None:
+            spans, controls, measure_times, note_diag = load_playback_source(
+                midi_path,
+                stuck_note_fix_mode=stuck_note_fix_mode,
+                midi_flip=midi_flip,
+                flip_bounds=flip_bounds,
+            )
+            packed_source = PackedPlaybackSource.from_python(
+                spans,
+                controls,
+                measure_times,
+                note_diag,
+                source_kind="python-packed",
+                native_backend=False,
+            )
+    else:
+        spans, controls, measure_times, note_diag = load_playback_source(
+            midi_path,
+            stuck_note_fix_mode=stuck_note_fix_mode,
+            midi_flip=midi_flip,
+            flip_bounds=flip_bounds,
         )
 
     return LoadedPlaybackData(
