@@ -2,7 +2,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::cmp::Ordering;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 
 const DEFAULT_TEMPO_US_PER_QN: u32 = 500_000;
@@ -85,6 +85,16 @@ struct NativePackedPlaybackSource {
     note_diag: NoteDiagnostics,
     duration_sec: f64,
     source_kind: String,
+}
+
+#[derive(Clone, Copy)]
+struct DensityCell {
+    x: u16,
+    y: u16,
+    track: u32,
+    velocity: u8,
+    is_black: bool,
+    density: u8,
 }
 
 impl NativePackedPlaybackSource {
@@ -207,6 +217,47 @@ impl NativePackedPlaybackSource {
         (0..self.note.len()).map(|idx| self.span_tuple(idx)).collect()
     }
 
+    #[pyo3(signature = (t, note_lo, note_hi, play_rows, hit_row, x_scale, move_speed, length_speed, note_direction="down"))]
+    fn visible_density_data(
+        &self,
+        t: f64,
+        note_lo: u8,
+        note_hi: u8,
+        play_rows: usize,
+        hit_row: i32,
+        x_scale: usize,
+        move_speed: f64,
+        length_speed: f64,
+        note_direction: &str,
+    ) -> (
+        Vec<(u16, u16, u32, u8, bool, u8)>,
+        Vec<(u8, u32, u8)>,
+        Vec<(u8, u32)>,
+    ) {
+        let cells;
+        let active;
+        let visible;
+        (cells, active, visible) = self.build_density_data(
+            t,
+            note_lo,
+            note_hi,
+            play_rows,
+            hit_row,
+            x_scale,
+            move_speed,
+            length_speed,
+            note_direction,
+        );
+        (
+            cells
+                .into_iter()
+                .map(|cell| (cell.x, cell.y, cell.track, cell.velocity, cell.is_black, cell.density))
+                .collect(),
+            active,
+            visible,
+        )
+    }
+
     fn track_ids(&self) -> Vec<u32> {
         let mut tracks = self.track.clone();
         tracks.sort_unstable();
@@ -246,6 +297,122 @@ impl NativePackedPlaybackSource {
             self.note.len(),
             self.duration_sec
         )
+    }
+}
+
+impl NativePackedPlaybackSource {
+    #[allow(clippy::too_many_arguments)]
+    fn build_density_data(
+        &self,
+        t: f64,
+        note_lo: u8,
+        note_hi: u8,
+        play_rows: usize,
+        hit_row: i32,
+        x_scale: usize,
+        move_speed: f64,
+        length_speed: f64,
+        note_direction: &str,
+    ) -> (Vec<DensityCell>, Vec<(u8, u32, u8)>, Vec<(u8, u32)>) {
+        let direction = if note_direction.eq_ignore_ascii_case("up") {
+            "up"
+        } else {
+            "down"
+        };
+        let window_sec = (play_rows as f64) / move_speed.max(1e-6);
+        let (t0, t1) = if direction == "up" {
+            (t - window_sec - 0.05, t + 0.05)
+        } else {
+            (t - 0.05, t + window_sec)
+        };
+        let visible = self.visible_spans(t0, t1);
+        let white_w = white_key_width(x_scale) as i32;
+        let black_key_w = black_key_width(x_scale) as i32;
+        let black_fall_w = black_fall_width(x_scale) as i32;
+
+        let mut cells: HashMap<(u16, u16), DensityCell> = HashMap::new();
+        let mut active: HashSet<(u8, u32, u8)> = HashSet::new();
+        let mut visible_notes: HashSet<(u8, u32)> = HashSet::new();
+
+        for (note, start, end, velocity, _channel, track) in visible {
+            if note < note_lo || note > note_hi {
+                continue;
+            }
+            if start <= t && t <= end {
+                active.insert((note, track, velocity));
+            }
+            visible_notes.insert((note, track));
+            let Some((y1, y2)) =
+                span_bounds(start, end, t, hit_row, move_speed, length_speed, direction)
+            else {
+                continue;
+            };
+            let x = note_x_native(note, x_scale) as i32;
+            if is_white_native(note) {
+                for y in y1..=y2 {
+                    if y < 0 || y >= play_rows as i32 {
+                        continue;
+                    }
+                    for dx in 0..white_w {
+                        let xx = x + dx;
+                        if xx < 0 {
+                            continue;
+                        }
+                        let key = (xx as u16, y as u16);
+                        let entry = cells.entry(key).or_insert(DensityCell {
+                            x: xx as u16,
+                            y: y as u16,
+                            track,
+                            velocity,
+                            is_black: false,
+                            density: 0,
+                        });
+                        entry.density = entry.density.saturating_add(1).min(4);
+                        if velocity >= entry.velocity {
+                            entry.track = track;
+                            entry.velocity = velocity;
+                        }
+                        entry.is_black = false;
+                    }
+                }
+            } else {
+                let x0 = x + ((black_key_w - black_fall_w).max(0) / 2);
+                for y in y1..=y2 {
+                    if y < 0 || y >= play_rows as i32 {
+                        continue;
+                    }
+                    for dx in 0..black_fall_w {
+                        let xx = x0 + dx;
+                        if xx < 0 {
+                            continue;
+                        }
+                        let key = (xx as u16, y as u16);
+                        let entry = cells.entry(key).or_insert(DensityCell {
+                            x: xx as u16,
+                            y: y as u16,
+                            track,
+                            velocity,
+                            is_black: true,
+                            density: 0,
+                        });
+                        entry.density = entry.density.saturating_add(1).min(4);
+                        if velocity >= entry.velocity {
+                            entry.track = track;
+                            entry.velocity = velocity;
+                        }
+                        entry.is_black = true;
+                    }
+                }
+            }
+        }
+
+        let mut cell_vec: Vec<DensityCell> = cells.into_values().collect();
+        cell_vec.sort_by(|a, b| a.y.cmp(&b.y).then_with(|| a.x.cmp(&b.x)));
+        let mut active_vec: Vec<(u8, u32, u8)> = active.into_iter().collect();
+        active_vec.sort_unstable();
+        let mut visible_vec: Vec<(u8, u32)> = visible_notes.into_iter().collect();
+        visible_vec.sort_unstable();
+        (cell_vec, active_vec, visible_vec)
     }
 }
 
@@ -799,6 +966,76 @@ fn lower_bound(values: &[f64], needle: f64) -> usize {
         }
     }
     lo
+}
+
+fn is_white_native(note: u8) -> bool {
+    matches!(note % 12, 0 | 2 | 4 | 5 | 7 | 9 | 11)
+}
+
+fn count_whites_before_native(note: u8) -> usize {
+    let mut count = 0usize;
+    let mut n = MIN_PIANO_NOTE;
+    while n < note {
+        if is_white_native(n) {
+            count += 1;
+        }
+        n = n.saturating_add(1);
+    }
+    count
+}
+
+fn white_key_width(x_scale: usize) -> usize {
+    (2 * x_scale).max(2)
+}
+
+fn black_key_width(x_scale: usize) -> usize {
+    (2 * x_scale).max(2)
+}
+
+fn black_fall_width(x_scale: usize) -> usize {
+    black_key_width(x_scale)
+}
+
+fn note_x_native(note: u8, x_scale: usize) -> usize {
+    let w = white_key_width(x_scale);
+    if is_white_native(note) {
+        return count_whites_before_native(note) * w;
+    }
+    let mut left = note.saturating_sub(1);
+    while left >= MIN_PIANO_NOTE && !is_white_native(left) {
+        if left == 0 {
+            break;
+        }
+        left = left.saturating_sub(1);
+    }
+    let base = if left < MIN_PIANO_NOTE { note } else { left };
+    (count_whites_before_native(base) * w) + x_scale.max(1)
+}
+
+fn span_bounds(
+    start_val: f64,
+    end_val: f64,
+    t: f64,
+    hit_row: i32,
+    move_speed: f64,
+    length_speed: f64,
+    direction: &str,
+) -> Option<(i32, i32)> {
+    let (y1, y2) = if direction == "up" {
+        let grow_dur = (t.min(end_val) - start_val).max(0.0);
+        let pixel_len = (grow_dur * length_speed).round().max(1.0) as i32;
+        let release_shift = ((t - end_val).max(0.0) * move_speed) as f64;
+        let y_bot = (f64::from(hit_row) - release_shift).floor() as i32;
+        (y_bot - pixel_len + 1, y_bot)
+    } else {
+        let pixel_len = ((end_val - start_val) * length_speed).round().max(1.0) as i32;
+        let y_bot = (f64::from(hit_row) + (t - start_val) * move_speed).floor() as i32;
+        (y_bot - pixel_len + 1, y_bot)
+    };
+    if y2 < 0 || y1 > hit_row {
+        return None;
+    }
+    Some((y1.max(0), y2.min(hit_row)))
 }
 
 fn upper_bound(values: &[f64], needle: f64) -> usize {

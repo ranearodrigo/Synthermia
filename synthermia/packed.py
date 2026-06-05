@@ -194,6 +194,41 @@ class PackedPlaybackSource:
             for sp in self.visible_spans(t0, t1)
         ]
 
+    def native_density_data(
+        self,
+        *,
+        t: float,
+        note_lo: int,
+        note_hi: int,
+        play_rows: int,
+        hit_row: int,
+        x_scale: int,
+        move_speed: float,
+        length_speed: float,
+        note_direction: str = "down",
+    ) -> Optional[Dict[str, object]]:
+        if self._native_source is None:
+            return None
+        cells, active, visible = self._native_source.visible_density_data(
+            float(t),
+            int(note_lo),
+            int(note_hi),
+            int(play_rows),
+            int(hit_row),
+            int(x_scale),
+            float(move_speed),
+            float(length_speed),
+            str(note_direction),
+        )
+        return {
+            "cells": [
+                (int(x), int(y), int(track), int(velocity), bool(is_black), int(density))
+                for x, y, track, velocity, is_black, density in cells
+            ],
+            "active": [(int(note), int(track), int(velocity)) for note, track, velocity in active],
+            "visible": [(int(note), int(track)) for note, track in visible],
+        }
+
     def track_ids(self) -> List[int]:
         if self._track_ids:
             return list(self._track_ids)

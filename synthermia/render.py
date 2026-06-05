@@ -19,6 +19,9 @@ from synthermia.config import (
 from synthermia.models import MIN_PIANO_NOTE, MAX_PIANO_NOTE, WHITE_PCS, NoteSpan
 
 PackedSpan = Tuple[int, float, float, int, int, int]
+DensityCell = Tuple[int, int, int, int, bool, int]
+ActiveDensityNote = Tuple[int, int, int]
+VisibleDensityNote = Tuple[int, int]
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +334,7 @@ def render_frame(
     visual_glyphs: Optional[Dict[str, object]] = None,
     measure_times: Optional[Sequence[float]] = None,
     note_direction: str = "down",
+    density_data: Optional[Dict[str, Sequence[object]]] = None,
 ) -> str:
     black_rows, white_rows, kb_rows = keyboard_row_counts(kb_y_scale, kb_black_extra)
     play_rows = rows - kb_rows
@@ -475,7 +479,9 @@ def render_frame(
     active_weighted_colors_by_note: Dict[int, List[Tuple[Tuple[int, int, int], float]]] = {}
     active_notes = set()
     packed_span_mode = bool(spans) and isinstance(spans[0], tuple)
-    density_mode = packed_span_mode and len(spans) >= max(512, play_rows * max(12, cols // 3))
+    density_mode = density_data is not None or (
+        packed_span_mode and len(spans) >= max(512, play_rows * max(12, cols // 3))
+    )
 
     def white_density_char(level: int) -> str:
         if level <= 1:
@@ -504,6 +510,15 @@ def render_frame(
         if width == 2:
             return left + right
         return left + (mid * (width - 2)) + right
+
+    def black_density_char(level: int) -> str:
+        if level <= 1:
+            return note_pedal_black_mid
+        if level == 2:
+            return note_pedal_black_mid
+        if level == 3:
+            return note_black_mid
+        return note_black_mid
 
     def span_bounds(start_val: float, end_val: float) -> Optional[Tuple[int, int]]:
         if direction == "up":
@@ -663,87 +678,118 @@ def render_frame(
                                 pedal_fall_alpha_scale[y][xx], pedal_cell_alpha
                             )
 
-    for sp in spans:
-        if packed_span_mode:
-            sp_note, sp_start, sp_end, sp_velocity, _sp_channel, sp_track = sp  # type: ignore[misc]
-        else:
-            sp_note = int(sp.note)  # type: ignore[union-attr]
-            sp_start = float(sp.start)  # type: ignore[union-attr]
-            sp_end = float(sp.end)  # type: ignore[union-attr]
-            sp_velocity = int(getattr(sp, "velocity", 100))  # type: ignore[arg-type]
-            sp_track = int(getattr(sp, "track", 0))  # type: ignore[arg-type]
-        if sp_end < t0:
-            continue
-        if sp_start > t1:
-            break
-        if not (note_lo <= sp_note <= note_hi):
-            continue
-        trk = sp_track
-        if sp_start <= t <= sp_end:
-            active_notes.add(sp_note)
-            add_unique_track(active_tracks_by_note, sp_note, trk)
-            vel_w = max(1.0, float(max(1, sp_velocity)))
-            active_weighted_colors_by_note.setdefault(sp_note, []).append((track_white_rgb(trk), vel_w))
+    if density_data is not None:
+        for note, trk, vel in density_data.get("active", ()):
+            active_notes.add(int(note))
+            add_unique_track(active_tracks_by_note, int(note), int(trk))
+            vel_w = max(1.0, float(max(1, int(vel))))
+            active_weighted_colors_by_note.setdefault(int(note), []).append((track_white_rgb(int(trk)), vel_w))
+        for note, trk in density_data.get("visible", ()):
+            add_unique_track(visible_tracks_by_note, int(note), int(trk))
+        for x, y, trk, vel, is_black_cell, density in density_data.get("cells", ()):
+            xx = int(x)
+            yy = int(y)
+            if not (0 <= xx < cols and 0 <= yy < play_rows):
+                continue
+            dens = max(1, min(4, int(density)))
+            note_density[yy][xx] = dens
+            trk_i = int(trk)
+            vel_i = max(1, min(127, int(vel)))
+            note_track[yy][xx] = trk_i
+            note_velocity[yy][xx] = vel_i
+            pedal_fall_mask[yy][xx] = False
+            pedal_black_fall_mask[yy][xx] = False
+            if bool(is_black_cell):
+                canvas[yy][xx] = black_density_char(dens)
+                black_fall_mask[yy][xx] = True
+            else:
+                canvas[yy][xx] = white_density_char(dens)
+                white_fall_track[yy][xx] = trk_i
+                white_fall_velocity[yy][xx] = vel_i
+                white_fall_alpha_scale[yy][xx] = 1.0
+                black_fall_mask[yy][xx] = False
+    else:
+        for sp in spans:
+            if packed_span_mode:
+                sp_note, sp_start, sp_end, sp_velocity, _sp_channel, sp_track = sp  # type: ignore[misc]
+            else:
+                sp_note = int(sp.note)  # type: ignore[union-attr]
+                sp_start = float(sp.start)  # type: ignore[union-attr]
+                sp_end = float(sp.end)  # type: ignore[union-attr]
+                sp_velocity = int(getattr(sp, "velocity", 100))  # type: ignore[arg-type]
+                sp_track = int(getattr(sp, "track", 0))  # type: ignore[arg-type]
+            if sp_end < t0:
+                continue
+            if sp_start > t1:
+                break
+            if not (note_lo <= sp_note <= note_hi):
+                continue
+            trk = sp_track
+            if sp_start <= t <= sp_end:
+                active_notes.add(sp_note)
+                add_unique_track(active_tracks_by_note, sp_note, trk)
+                vel_w = max(1.0, float(max(1, sp_velocity)))
+                active_weighted_colors_by_note.setdefault(sp_note, []).append((track_white_rgb(trk), vel_w))
 
-        y_pair = span_bounds(sp_start, sp_end)
-        if y_pair is None:
-            continue
-        y1, y2 = y_pair
-        x = note_x(sp_note, x_scale)
-        add_unique_track(visible_tracks_by_note, sp_note, trk)
+            y_pair = span_bounds(sp_start, sp_end)
+            if y_pair is None:
+                continue
+            y1, y2 = y_pair
+            x = note_x(sp_note, x_scale)
+            add_unique_track(visible_tracks_by_note, sp_note, trk)
 
-        if is_white(sp_note):
-            vel = max(1, min(127, sp_velocity))
-            for y in range(y1, y2 + 1):
-                if 0 <= y < play_rows:
-                    for dx in range(white_w):
-                        xx = x + dx
-                        if 0 <= xx < cols:
-                            if density_mode:
-                                dens = min(4, note_density[y][xx] + 1)
-                                note_density[y][xx] = dens
-                                canvas[y][xx] = white_density_char(dens)
-                                if vel >= note_velocity[y][xx]:
+            if is_white(sp_note):
+                vel = max(1, min(127, sp_velocity))
+                for y in range(y1, y2 + 1):
+                    if 0 <= y < play_rows:
+                        for dx in range(white_w):
+                            xx = x + dx
+                            if 0 <= xx < cols:
+                                if density_mode:
+                                    dens = min(4, note_density[y][xx] + 1)
+                                    note_density[y][xx] = dens
+                                    canvas[y][xx] = white_density_char(dens)
+                                    if vel >= note_velocity[y][xx]:
+                                        white_fall_track[y][xx] = trk
+                                        white_fall_velocity[y][xx] = vel
+                                        white_fall_alpha_scale[y][xx] = 1.0
+                                        note_track[y][xx] = trk
+                                        note_velocity[y][xx] = vel
+                                else:
+                                    canvas[y][xx] = note_white_glyph
                                     white_fall_track[y][xx] = trk
                                     white_fall_velocity[y][xx] = vel
                                     white_fall_alpha_scale[y][xx] = 1.0
                                     note_track[y][xx] = trk
                                     note_velocity[y][xx] = vel
-                            else:
-                                canvas[y][xx] = note_white_glyph
-                                white_fall_track[y][xx] = trk
-                                white_fall_velocity[y][xx] = vel
-                                white_fall_alpha_scale[y][xx] = 1.0
-                                note_track[y][xx] = trk
-                                note_velocity[y][xx] = vel
-                            black_fall_mask[y][xx] = False
-                            pedal_fall_mask[y][xx] = False
-                            pedal_black_fall_mask[y][xx] = False
-        else:
-            bw = black_fall_w
-            x0 = x + max(0, (black_key_w - bw) // 2)
-            vel = max(1, min(127, sp_velocity))
-            black_chunk = black_density_chunk(4, bw)
-            for y in range(y1, y2 + 1):
-                if 0 <= y < play_rows:
-                    for dx in range(bw):
-                        xx = x0 + dx
-                        if 0 <= xx < cols:
-                            if density_mode:
-                                dens = min(4, note_density[y][xx] + 1)
-                                note_density[y][xx] = dens
-                                chunk = black_density_chunk(dens, bw)
-                                canvas[y][xx] = chunk[dx]
-                                if vel >= note_velocity[y][xx]:
+                                black_fall_mask[y][xx] = False
+                                pedal_fall_mask[y][xx] = False
+                                pedal_black_fall_mask[y][xx] = False
+            else:
+                bw = black_fall_w
+                x0 = x + max(0, (black_key_w - bw) // 2)
+                vel = max(1, min(127, sp_velocity))
+                black_chunk = black_density_chunk(4, bw)
+                for y in range(y1, y2 + 1):
+                    if 0 <= y < play_rows:
+                        for dx in range(bw):
+                            xx = x0 + dx
+                            if 0 <= xx < cols:
+                                if density_mode:
+                                    dens = min(4, note_density[y][xx] + 1)
+                                    note_density[y][xx] = dens
+                                    chunk = black_density_chunk(dens, bw)
+                                    canvas[y][xx] = chunk[dx]
+                                    if vel >= note_velocity[y][xx]:
+                                        note_track[y][xx] = trk
+                                        note_velocity[y][xx] = vel
+                                else:
+                                    canvas[y][xx] = black_chunk[dx]
                                     note_track[y][xx] = trk
                                     note_velocity[y][xx] = vel
-                            else:
-                                canvas[y][xx] = black_chunk[dx]
-                                note_track[y][xx] = trk
-                                note_velocity[y][xx] = vel
-                            black_fall_mask[y][xx] = True
-                            pedal_fall_mask[y][xx] = False
-                            pedal_black_fall_mask[y][xx] = False
+                                black_fall_mask[y][xx] = True
+                                pedal_fall_mask[y][xx] = False
+                                pedal_black_fall_mask[y][xx] = False
 
     # Draw moving measure separators behind notes.
     if measure_times:

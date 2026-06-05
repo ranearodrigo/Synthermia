@@ -996,8 +996,27 @@ def playback(
             window_sec = max(0.001, float(play_rows) / max(0.001, float(args.drop_speed)))
             t0 = t - 0.05
             t1 = t + window_sec
+            density_data = None
             if packed_source_active is not None:
-                visible_spans = packed_source_active.visible_note_tuples(t0, t1)
+                if (
+                    packed_source_active.native_backend
+                    and packed_source_active.note_count >= 20000
+                ):
+                    density_data = packed_source_active.native_density_data(
+                        t=t,
+                        note_lo=note_lo,
+                        note_hi=note_hi,
+                        play_rows=play_rows,
+                        hit_row=play_rows - 1,
+                        x_scale=effective_x_scale,
+                        move_speed=float(args.drop_speed),
+                        length_speed=float(args.drop_speed),
+                        note_direction="down",
+                    )
+                if density_data is not None:
+                    visible_spans = []
+                else:
+                    visible_spans = packed_source_active.visible_note_tuples(t0, t1)
             else:
                 if span_window_index is None:
                     visible_spans = []
@@ -1034,6 +1053,7 @@ def playback(
                     terminal_bg_rgb=terminal_bg_rgb,
                     visual_glyphs=visual_glyphs,
                     measure_times=measure_times_src if bool(getattr(args, "measure_bars", False)) else None,
+                    density_data=density_data,
                 )
                 raw_lines = frame.splitlines()
                 frame_rows = len(raw_lines) + 2
