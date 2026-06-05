@@ -997,7 +997,7 @@ def playback(
             t0 = t - 0.05
             t1 = t + window_sec
             if packed_source_active is not None:
-                visible_spans = packed_source_active.visible_spans(t0, t1)
+                visible_spans = packed_source_active.visible_note_tuples(t0, t1)
             else:
                 if span_window_index is None:
                     visible_spans = []

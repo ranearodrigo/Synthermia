@@ -18,6 +18,8 @@ from synthermia.config import (
 )
 from synthermia.models import MIN_PIANO_NOTE, MAX_PIANO_NOTE, WHITE_PCS, NoteSpan
 
+PackedSpan = Tuple[int, float, float, int, int, int]
+
 
 # ---------------------------------------------------------------------------
 # Keyboard geometry
@@ -306,7 +308,7 @@ def ornamental_fill(width: int, row: int = 0, phase: int = 0) -> str:
 # ---------------------------------------------------------------------------
 
 def render_frame(
-    spans: Sequence[NoteSpan],
+    spans: Sequence[NoteSpan | PackedSpan],
     pedal_spans: Optional[Sequence[NoteSpan]],
     t: float,
     note_lo: int,
@@ -472,19 +474,19 @@ def render_frame(
     active_weighted_colors_by_note: Dict[int, List[Tuple[Tuple[int, int, int], float]]] = {}
     active_notes = set()
 
-    def span_bounds(sp: NoteSpan) -> Optional[Tuple[int, int]]:
+    def span_bounds(start_val: float, end_val: float) -> Optional[Tuple[int, int]]:
         if direction == "up":
             # For upward mode, keep active notes anchored at the piano edge and
             # only move them upward after release. This avoids base flicker.
-            grow_dur = max(0.0, min(t, sp.end) - sp.start)
+            grow_dur = max(0.0, min(t, end_val) - start_val)
             pixel_len = max(1, int(round(grow_dur * length_speed)))
-            release_shift = max(0.0, (t - sp.end) * move_speed)
+            release_shift = max(0.0, (t - end_val) * move_speed)
             y_bot = int(math.floor(hit_row - release_shift))
             y1 = y_bot - pixel_len + 1
             y2 = y_bot
         else:
-            pixel_len = max(1, int(round((sp.end - sp.start) * length_speed)))
-            y_bot = int(math.floor(hit_row + (t - sp.start) * move_speed))
+            pixel_len = max(1, int(round((end_val - start_val) * length_speed)))
+            y_bot = int(math.floor(hit_row + (t - start_val) * move_speed))
             y1 = y_bot - pixel_len + 1
             y2 = y_bot
         if y2 < 0 or y1 > hit_row:
@@ -498,7 +500,7 @@ def render_frame(
             break
         if not (note_lo <= sp.note <= note_hi):
             continue
-        y_pair = span_bounds(sp)
+        y_pair = span_bounds(float(sp.start), float(sp.end))
         if y_pair is None:
             continue
         y1, y2 = y_pair
@@ -630,29 +632,38 @@ def render_frame(
                                 pedal_fall_alpha_scale[y][xx], pedal_cell_alpha
                             )
 
+    packed_span_mode = bool(spans) and isinstance(spans[0], tuple)
     for sp in spans:
-        if sp.end < t0:
+        if packed_span_mode:
+            sp_note, sp_start, sp_end, sp_velocity, _sp_channel, sp_track = sp  # type: ignore[misc]
+        else:
+            sp_note = int(sp.note)  # type: ignore[union-attr]
+            sp_start = float(sp.start)  # type: ignore[union-attr]
+            sp_end = float(sp.end)  # type: ignore[union-attr]
+            sp_velocity = int(getattr(sp, "velocity", 100))  # type: ignore[arg-type]
+            sp_track = int(getattr(sp, "track", 0))  # type: ignore[arg-type]
+        if sp_end < t0:
             continue
-        if sp.start > t1:
+        if sp_start > t1:
             break
-        if not (note_lo <= sp.note <= note_hi):
+        if not (note_lo <= sp_note <= note_hi):
             continue
-        trk = int(getattr(sp, "track", 0))
-        if sp.start <= t <= sp.end:
-            active_notes.add(sp.note)
-            add_unique_track(active_tracks_by_note, sp.note, trk)
-            vel_w = max(1.0, float(max(1, int(getattr(sp, "velocity", 1)))))
-            active_weighted_colors_by_note.setdefault(sp.note, []).append((track_white_rgb(trk), vel_w))
+        trk = sp_track
+        if sp_start <= t <= sp_end:
+            active_notes.add(sp_note)
+            add_unique_track(active_tracks_by_note, sp_note, trk)
+            vel_w = max(1.0, float(max(1, sp_velocity)))
+            active_weighted_colors_by_note.setdefault(sp_note, []).append((track_white_rgb(trk), vel_w))
 
-        y_pair = span_bounds(sp)
+        y_pair = span_bounds(sp_start, sp_end)
         if y_pair is None:
             continue
         y1, y2 = y_pair
-        x = note_x(sp.note, x_scale)
-        add_unique_track(visible_tracks_by_note, sp.note, trk)
+        x = note_x(sp_note, x_scale)
+        add_unique_track(visible_tracks_by_note, sp_note, trk)
 
-        if is_white(sp.note):
-            vel = max(1, min(127, int(getattr(sp, "velocity", 100))))
+        if is_white(sp_note):
+            vel = max(1, min(127, sp_velocity))
             for y in range(y1, y2 + 1):
                 if 0 <= y < play_rows:
                     for dx in range(white_w):
@@ -670,7 +681,7 @@ def render_frame(
         else:
             bw = black_fall_w
             x0 = x + max(0, (black_key_w - bw) // 2)
-            vel = max(1, min(127, int(getattr(sp, "velocity", 100))))
+            vel = max(1, min(127, sp_velocity))
             if bw <= 1:
                 black_chunk = note_black_mid
             elif bw == 2:

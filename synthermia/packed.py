@@ -169,6 +169,31 @@ class PackedPlaybackSource:
         out.sort(key=lambda sp: (float(sp.start), float(sp.end), int(sp.note), int(getattr(sp, "channel", 0))))
         return out
 
+    def visible_note_tuples(self, t0: float, t1: float) -> List[Tuple[int, float, float, int, int, int]]:
+        if self._native_source is not None:
+            return [
+                (
+                    int(note),
+                    float(start),
+                    float(end),
+                    int(velocity),
+                    int(channel),
+                    int(track),
+                )
+                for note, start, end, velocity, channel, track in self._native_source.visible_spans(float(t0), float(t1))
+            ]
+        return [
+            (
+                int(sp.note),
+                float(sp.start),
+                float(sp.end),
+                int(sp.velocity),
+                int(getattr(sp, "channel", 0)),
+                int(getattr(sp, "track", 0)),
+            )
+            for sp in self.visible_spans(t0, t1)
+        ]
+
     def track_ids(self) -> List[int]:
         if self._track_ids:
             return list(self._track_ids)
