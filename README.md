@@ -26,6 +26,10 @@ Optional (better auto-latency probing/logs):
 Optional (MP3 export from TUI):
 - `ffmpeg`
 
+Optional (native packed playback acceleration for very large MIDIs):
+- Rust toolchain
+- `maturin` for local extension builds
+
 ## Quick Start
 
 Launch the interactive TUI config screen (pick MIDI, SoundFont, and settings):
@@ -110,5 +114,21 @@ Use `python3 main.py -h` for full options. Main groups:
 
 - **Input**: MIDI file path, live MIDI mode + port + save dir + pedal invert + live mapping strings
 - **Audio**: engine, FluidSynth binary, driver, output device (`--audio-output`), gain, period size/periods/sample rate, SoundFont (`--soundfont`), SoundFont library (`--soundfonts`), bank/program
-- **Playback**: fps, rows, drop speed, speed, start, range, stuck-note-fix, midi-flip
+- **Playback**: fps, rows, drop speed, speed, start, range, stuck-note-fix, midi-flip, playback-engine
 - **Visual**: glyphs, dynamics threshold, pedal dots/opacity/decay, measure bars, keyboard scale, piano visibility, colors, terminal background, ascii-ui
+
+## Optional Native Acceleration
+
+Synthermia can run entirely in pure Python, but it now has an optional packed playback path aimed at very large MIDI files.
+
+- `--playback-engine python`: force the legacy Python object path
+- `--playback-engine packed`: use packed window queries and prefer the native extension when available
+- `--playback-engine auto`: default; switches to the packed path for larger MIDI files
+
+If the native extension is not installed, Synthermia falls back to a Python packed representation instead of failing.
+
+To build the extension locally:
+
+```bash
+maturin develop
+```

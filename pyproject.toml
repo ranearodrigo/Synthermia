@@ -1,0 +1,25 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "synthermia"
+version = "0.1.0"
+description = "Terminal Synthesia-style MIDI visualizer with optional native acceleration"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Synthermia contributors" }
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "synthermia_native"
+python-source = "."
+manifest-path = "Cargo.toml"

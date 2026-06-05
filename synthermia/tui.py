@@ -214,6 +214,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         "soundfont": saved_soundfont_primary,
         "soundfonts": list(saved_soundfonts),
         "audio_engine": str(saved.get("audio_engine", args.audio_engine)),
+        "playback_engine": str(saved.get("playback_engine", getattr(args, "playback_engine", "auto"))),
         "fluidsynth_bin": str(saved.get("fluidsynth_bin", args.fluidsynth_bin)),
         "audio_driver": str(saved.get("audio_driver", args.audio_driver)),
         "audio_output": str(saved.get("audio_output", getattr(args, "audio_output", ""))),
@@ -367,6 +368,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         {"key": "audio_period_size", "label": "Audio Period Size", "type": "int", "step": 64, "min": 0, "section": "Audio"},
         {"key": "audio_periods", "label": "Audio Periods", "type": "int", "step": 1, "min": 0, "section": "Audio"},
         {"key": "audio_samplerate", "label": "Audio Samplerate", "type": "int", "step": 1000, "min": 0, "section": "Audio"},
+        {"key": "playback_engine", "label": "Playback Engine", "type": "choice", "options": ["auto", "python", "packed"], "section": "Playback"},
         {"key": "fps", "label": "FPS", "type": "int", "step": 1, "min": 1, "section": "Playback"},
         {"key": "rows", "label": "Rows", "type": "int", "step": 1, "min": 4, "section": "Playback"},
         {"key": "drop_speed", "label": "Drop Speed", "type": "float", "step": 0.5, "min": 0.1, "section": "Playback"},
@@ -448,6 +450,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                 "track_colors": dict(state["track_colors"]),
                 "track_volumes": dict(state["track_volumes"]),
                 "audio_engine": str(state["audio_engine"]),
+                "playback_engine": str(state["playback_engine"]),
                 "fluidsynth_bin": str(state["fluidsynth_bin"]),
                 "audio_driver": str(state["audio_driver"]),
                 "audio_output": str(state["audio_output"]),
@@ -2400,6 +2403,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
     args.soundfont = str(state["soundfont"])
     args.soundfonts = list(_normalize_saved_soundfont_library(state.get("soundfonts", []), primary_soundfont=args.soundfont))
     args.audio_engine = str(state["audio_engine"])
+    args.playback_engine = str(state["playback_engine"])
     args.fluidsynth_bin = str(state["fluidsynth_bin"])
     args.audio_driver = str(state["audio_driver"])
     args.audio_output = str(state["audio_output"])

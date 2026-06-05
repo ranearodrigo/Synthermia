@@ -41,7 +41,6 @@ from synthermia.config import (
     save_last_config,
 )
 from synthermia.midi import (
-    load_playback_source,
     write_varlen,
 )
 from synthermia.models import (
@@ -55,6 +54,7 @@ from synthermia.models import (
     NoteSpan,
     _LiveMidiEvent,
 )
+from synthermia.packed import PackedPlaybackSource, load_selected_playback_data
 from synthermia.render import (
     _safe_stdout_write,
     keyboard_row_counts,
@@ -525,6 +525,7 @@ def playback(
     args: argparse.Namespace,
     controls: Optional[Sequence[ControlEvent]] = None,
     measure_times: Optional[Sequence[float]] = None,
+    packed_source: Optional[PackedPlaybackSource] = None,
 ) -> None:
     if not spans:
         raise ValueError("No playable notes found in MIDI")
@@ -572,6 +573,7 @@ def playback(
         controls_src = [ev for ev in controls_src if int(getattr(ev, "controller", -1)) != 64]
     measure_times_src = list(measure_times or [])
     span_window_index = _build_span_window_index(spans)
+    packed_source_active = packed_source
     pedal_visual_spans: List[NoteSpan] = []
     pedal_window_index: Optional[_SpanWindowIndex] = None
     if bool(getattr(args, "pedal_visual_dots", False)) and not bool(getattr(args, "disable_pedal", False)):
@@ -640,7 +642,7 @@ def playback(
         nonlocal _b_rows, _w_rows, kb_rows, min_rows, play_rows
         nonlocal lo_hi, note_lo, note_hi, term_w, max_frame_cols, effective_x_scale, frame_cols
         nonlocal show_piano, track_color_map, terminal_bg_rgb, visual_glyphs
-        nonlocal span_window_index, pedal_visual_spans, pedal_window_index
+        nonlocal span_window_index, packed_source_active, pedal_visual_spans, pedal_window_index
         nonlocal default_program, track_programs, soundfont_paths, valid_pairs_by_sf, requires_python_audio
         nonlocal audio_spans, channel_programs, channel_soundfonts, source_channels, track_default_channels, audio_controls
         nonlocal start_time, end_time, frame_dt, title, use_offpiano_pattern, audio_gain
@@ -653,12 +655,17 @@ def playback(
 
         release_audio_runtime()
 
-        spans, controls_src, measure_times_src, _note_diag = load_playback_source(
+        loaded = load_selected_playback_data(
             midi_path,
             stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "off")),
             midi_flip=bool(getattr(args, "midi_flip", False)),
             flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+            playback_engine=str(getattr(args, "playback_engine", "auto")),
         )
+        spans = loaded.spans
+        controls_src = loaded.controls
+        measure_times_src = loaded.measure_times
+        packed_source_active = loaded.packed_source
         if not spans:
             raise ValueError("No playable notes found in MIDI")
         if bool(getattr(args, "disable_pedal", False)):
@@ -974,7 +981,10 @@ def playback(
             window_sec = max(0.001, float(play_rows) / max(0.001, float(args.drop_speed)))
             t0 = t - 0.05
             t1 = t + window_sec
-            visible_spans = _select_spans_in_window(span_window_index, t0, t1)
+            if packed_source_active is not None:
+                visible_spans = packed_source_active.visible_spans(t0, t1)
+            else:
+                visible_spans = _select_spans_in_window(span_window_index, t0, t1)
             visible_pedal_spans: List[NoteSpan] = []
             if pedal_window_index is not None:
                 visible_pedal_spans = _select_spans_in_window(pedal_window_index, t0, t1)

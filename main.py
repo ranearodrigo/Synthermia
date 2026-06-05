@@ -17,7 +17,8 @@ from synthermia.config import (
     resolve_visual_glyphs,
     save_last_config,
 )
-from synthermia.midi import load_playback_source, normalize_stuck_note_fix_mode
+from synthermia.midi import normalize_stuck_note_fix_mode
+from synthermia.packed import load_selected_playback_data, resolve_playback_engine
 from synthermia.playback import list_midi_input_ports, playback, playback_live_midi_input
 from synthermia.soundfont import _normalize_saved_soundfont_library
 from synthermia.tui import run_config_screen
@@ -77,6 +78,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         choices=["python", "cli"],
         default="python",
         help="Audio backend: python=pyFluidSynth in-process (default), cli=external fluidsynth process",
+    )
+    p.add_argument(
+        "--playback-engine",
+        type=str,
+        choices=["auto", "python", "packed"],
+        default="auto",
+        help="Playback data engine: auto=use packed path for large MIDIs, python=legacy object path, packed=packed window queries",
     )
     p.add_argument("--fluidsynth-bin", type=str, default="fluidsynth", help="FluidSynth executable name/path (cli engine)")
     p.add_argument("--audio-driver", type=str, default="", help="FluidSynth audio driver (example: pipewire, alsa)")
@@ -277,6 +285,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         getattr(args, "soundfonts", []),
         primary_soundfont=str(getattr(args, "soundfont", "")),
     )
+    args.playback_engine = resolve_playback_engine(str(getattr(args, "playback_engine", "auto")))
     no_args_mode = len(raw_argv) == 0
 
     try:
@@ -316,12 +325,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not os.path.exists(args.midi):
             print(f"MIDI file not found: {args.midi}", file=sys.stderr)
             return 2
-        spans, controls, measure_times, note_diag = load_playback_source(
+        loaded = load_selected_playback_data(
             str(args.midi),
             stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
             midi_flip=bool(getattr(args, "midi_flip", False)),
             flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+            playback_engine=str(getattr(args, "playback_engine", "auto")),
         )
+        spans = loaded.spans
+        controls = loaded.controls
+        measure_times = loaded.measure_times
+        note_diag = loaded.note_diag
         overlap_fixes = int(note_diag.get("overlap_fixes", 0))
         orphan_offs = int(note_diag.get("orphan_note_offs", 0))
         unmatched_ons = int(note_diag.get("remaining_unmatched_note_ons", 0))
@@ -350,8 +364,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
                 args.start = clamped_start
 
+        if loaded.engine_requested == "packed" and loaded.packed_source is not None and not loaded.native_backend:
+            print(
+                "Packed playback requested but the native extension is unavailable; using the Python packed fallback.",
+                file=sys.stderr,
+            )
+
         save_last_config(args_to_saved_config(args, selected_midi_for_config))
-        playback(spans, args, controls=controls, measure_times=measure_times)
+        playback(
+            spans,
+            args,
+            controls=controls,
+            measure_times=measure_times,
+            packed_source=loaded.packed_source,
+        )
         return 0
     except KeyboardInterrupt:
         return 130

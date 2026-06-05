@@ -351,6 +351,7 @@ def args_to_saved_config(args: argparse.Namespace, selected_midi: str) -> Dict[s
         "track_colors": saved_track_colors,
         "track_volumes": saved_track_volumes,
         "audio_engine": args.audio_engine,
+        "playback_engine": str(getattr(args, "playback_engine", "auto")),
         "fluidsynth_bin": args.fluidsynth_bin,
         "audio_driver": args.audio_driver,
         "audio_output": str(getattr(args, "audio_output", "")),
