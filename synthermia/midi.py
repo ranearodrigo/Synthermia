@@ -16,6 +16,11 @@ from synthermia.models import (
     RawEvent,
 )
 
+try:
+    from synthermia_native import parse_midi_track_summaries_native
+except Exception:
+    parse_midi_track_summaries_native = None
+
 
 def read_u32_be(data: bytes, i: int) -> Tuple[int, int]:
     return struct.unpack(">I", data[i : i + 4])[0], i + 4
@@ -202,6 +207,20 @@ def parse_midi(path: str) -> Tuple[MidiHeader, List[RawEvent]]:
 
 
 def parse_midi_track_summaries(path: str) -> List[MidiTrackSummary]:
+    if callable(parse_midi_track_summaries_native):
+        try:
+            return [
+                MidiTrackSummary(
+                    index=int(index),
+                    name=str(name),
+                    note_ons=int(note_ons),
+                    instrument_name=str(instrument_name),
+                )
+                for index, name, note_ons, instrument_name in parse_midi_track_summaries_native(path)
+            ]
+        except Exception:
+            pass
+
     with open(path, "rb") as f:
         data = f.read()
 

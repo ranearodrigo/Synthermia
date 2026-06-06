@@ -875,11 +875,26 @@ fn debug_native_profile_load(
     })
 }
 
+#[pyfunction]
+fn parse_midi_track_summaries_native(
+    py: Python<'_>,
+    midi_path: &str,
+) -> PyResult<Vec<(u32, String, u32, String)>> {
+    let midi_path = midi_path.to_owned();
+    py.allow_threads(move || parse_midi_track_summaries_file(&midi_path))
+}
+
 fn parse_midi_file(path: &str) -> PyResult<(u16, Vec<Vec<RawEvent>>)> {
     let data = fs::read(path)
         .map_err(|err| PyValueError::new_err(format!("Failed to read MIDI file: {err}")))?;
     let cancel_flag = Arc::new(AtomicBool::new(false));
     parse_midi_bytes_with_progress(&data, &cancel_flag, |_, _, _| {})
+}
+
+fn parse_midi_track_summaries_file(path: &str) -> PyResult<Vec<(u32, String, u32, String)>> {
+    let data = fs::read(path)
+        .map_err(|err| PyValueError::new_err(format!("Failed to read MIDI file: {err}")))?;
+    parse_midi_track_summaries_bytes(&data)
 }
 
 fn parse_midi_file_with_progress(
@@ -898,6 +913,126 @@ fn parse_midi_file_with_progress(
             progress.seconds_ready = 0.0;
         }
     })
+}
+
+fn parse_midi_track_summaries_bytes(data: &[u8]) -> PyResult<Vec<(u32, String, u32, String)>> {
+    let mut i = 0usize;
+    ensure_chunk(data, i, b"MThd", "missing MThd header")?;
+    i += 4;
+    let (hdr_len, i2) = read_u32_be(data, i)?;
+    i = i2;
+    if hdr_len < 6 {
+        return Err(PyValueError::new_err("Invalid MIDI: bad header length"));
+    }
+
+    let (_fmt, i2) = read_u16_be(data, i)?;
+    i = i2;
+    let (ntrks, i2) = read_u16_be(data, i)?;
+    i = i2;
+    let (division, i2) = read_u16_be(data, i)?;
+    i = i2;
+    i = i.saturating_add(hdr_len as usize - 6);
+
+    if division & 0x8000 != 0 {
+        return Err(PyValueError::new_err("SMPTE time division is not supported"));
+    }
+
+    let mut summaries = Vec::with_capacity(ntrks as usize);
+    for track_idx in 0..ntrks {
+        ensure_chunk(data, i, b"MTrk", "missing MTrk chunk")?;
+        i += 4;
+        let (trk_len, i2) = read_u32_be(data, i)?;
+        i = i2;
+        let trk_end = i.saturating_add(trk_len as usize);
+        if trk_end > data.len() {
+            return Err(PyValueError::new_err("Invalid MIDI: truncated MTrk chunk"));
+        }
+
+        let mut running_status: Option<u8> = None;
+        let mut note_ons = 0u32;
+        let mut track_name = format!("Track {}", usize::from(track_idx) + 1);
+        let mut instrument_name = String::new();
+        let mut name_seen = false;
+        let mut instrument_seen = false;
+
+        while i < trk_end {
+            let (_delta, i2) = read_varlen(data, i)?;
+            i = i2;
+            let raw_status = *data
+                .get(i)
+                .ok_or_else(|| PyValueError::new_err("Invalid MIDI: truncated event status"))?;
+            let status = if raw_status < 0x80 {
+                running_status
+                    .ok_or_else(|| PyValueError::new_err("Invalid MIDI: running status missing"))?
+            } else {
+                i += 1;
+                running_status = if raw_status < 0xF0 { Some(raw_status) } else { None };
+                raw_status
+            };
+
+            if status == 0xFF {
+                let meta_type = *data
+                    .get(i)
+                    .ok_or_else(|| PyValueError::new_err("Invalid MIDI: truncated meta type"))?;
+                i += 1;
+                let (length, i2) = read_varlen(data, i)?;
+                i = i2;
+                let payload_end = i.saturating_add(length as usize);
+                let payload = data
+                    .get(i..payload_end)
+                    .ok_or_else(|| PyValueError::new_err("Invalid MIDI: truncated meta payload"))?;
+                i = payload_end;
+                if meta_type == 0x03 && !name_seen {
+                    let txt = latin1_trimmed(payload);
+                    if !txt.is_empty() {
+                        track_name = txt;
+                        name_seen = true;
+                    }
+                } else if meta_type == 0x04 && !instrument_seen {
+                    let txt = latin1_trimmed(payload);
+                    if !txt.is_empty() {
+                        instrument_name = txt;
+                        instrument_seen = true;
+                    }
+                }
+                continue;
+            }
+
+            if matches!(status, 0xF0 | 0xF7) {
+                let (length, i2) = read_varlen(data, i)?;
+                i = i2.saturating_add(length as usize);
+                if i > trk_end {
+                    return Err(PyValueError::new_err("Invalid MIDI: truncated sysex payload"));
+                }
+                continue;
+            }
+
+            let msg_type = status & 0xF0;
+            if matches!(msg_type, 0xC0 | 0xD0) {
+                i = i.saturating_add(1);
+                if i > trk_end {
+                    return Err(PyValueError::new_err("Invalid MIDI: truncated channel event"));
+                }
+                continue;
+            }
+
+            let _p1 = *data
+                .get(i)
+                .ok_or_else(|| PyValueError::new_err("Invalid MIDI: truncated event payload"))?;
+            let p2 = *data
+                .get(i + 1)
+                .ok_or_else(|| PyValueError::new_err("Invalid MIDI: truncated event payload"))?;
+            i += 2;
+            if msg_type == 0x90 && p2 > 0 {
+                note_ons = note_ons.saturating_add(1);
+            }
+        }
+
+        i = trk_end;
+        summaries.push((u32::from(track_idx), track_name, note_ons, instrument_name));
+    }
+
+    Ok(summaries)
 }
 
 fn parse_midi_bytes_with_progress<F>(
@@ -1567,6 +1702,11 @@ fn read_varlen(data: &[u8], mut i: usize) -> PyResult<(u64, usize)> {
     }
 }
 
+fn latin1_trimmed(bytes: &[u8]) -> String {
+    let text: String = bytes.iter().map(|byte| char::from(*byte)).collect();
+    text.trim().to_owned()
+}
+
 fn lower_bound(values: &[f64], needle: f64) -> usize {
     let mut lo = 0usize;
     let mut hi = values.len();
@@ -1677,5 +1817,6 @@ fn synthermia_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(start_packed_playback_load_task_native, m)?)?;
     m.add_function(wrap_pyfunction!(load_packed_playback_source_native, m)?)?;
     m.add_function(wrap_pyfunction!(debug_native_profile_load, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_midi_track_summaries_native, m)?)?;
     Ok(())
 }
