@@ -4,6 +4,7 @@ use pyo3::types::PyDict;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::fs;
+use std::time::Instant;
 
 const DEFAULT_TEMPO_US_PER_QN: u32 = 500_000;
 const MIN_PIANO_NOTE: u8 = 21;
@@ -116,16 +117,6 @@ impl RawEvent {
 }
 
 #[derive(Clone, Copy)]
-struct NativeSpan {
-    note: u8,
-    start: f64,
-    end: f64,
-    velocity: u8,
-    channel: u8,
-    track: u32,
-}
-
-#[derive(Clone, Copy)]
 struct NativeControl {
     time_sec: f64,
     channel: u8,
@@ -150,9 +141,7 @@ struct NativePackedPlaybackSource {
     velocity: Vec<u8>,
     channel: Vec<u8>,
     track: Vec<u32>,
-    by_start: Vec<usize>,
     by_end: Vec<usize>,
-    start_values: Vec<f64>,
     end_values: Vec<f64>,
     controls: Vec<NativeControl>,
     measure_times: Vec<f64>,
@@ -243,54 +232,42 @@ impl<'a> Iterator for MergedTrackEventIter<'a> {
 #[derive(Clone, Copy)]
 struct ActiveNote {
     start_tick: u64,
-    start_sec: f64,
-    velocity: u8,
+    span_idx: usize,
+}
+
+struct NativeBuildRows {
+    start_sec: Vec<f64>,
+    end_sec: Vec<f64>,
+    note: Vec<u8>,
+    velocity: Vec<u8>,
+    channel: Vec<u8>,
+    track: Vec<u32>,
+    by_end: Vec<usize>,
+    controls: Vec<NativeControl>,
+    measure_times: Vec<f64>,
+    note_diag: NoteDiagnostics,
+    duration_sec: f64,
 }
 
 impl NativePackedPlaybackSource {
-    fn from_rows(
-        spans: Vec<NativeSpan>,
-        controls: Vec<NativeControl>,
-        measure_times: Vec<f64>,
-        note_diag: NoteDiagnostics,
+    fn from_build_rows(
+        rows: NativeBuildRows,
     ) -> Self {
-        let duration_sec = spans.iter().map(|sp| sp.end).fold(0.0, f64::max);
-        let start_sec: Vec<f64> = spans.iter().map(|sp| sp.start).collect();
-        let end_sec: Vec<f64> = spans.iter().map(|sp| sp.end).collect();
-        let note: Vec<u8> = spans.iter().map(|sp| sp.note).collect();
-        let velocity: Vec<u8> = spans.iter().map(|sp| sp.velocity).collect();
-        let channel: Vec<u8> = spans.iter().map(|sp| sp.channel).collect();
-        let track: Vec<u32> = spans.iter().map(|sp| sp.track).collect();
-
-        let mut by_start: Vec<usize> = (0..spans.len()).collect();
-        by_start.sort_by(|&a, &b| {
-            total_cmp_f64(start_sec[a], start_sec[b])
-                .then_with(|| total_cmp_f64(end_sec[a], end_sec[b]))
-                .then_with(|| note[a].cmp(&note[b]))
-                .then_with(|| channel[a].cmp(&channel[b]))
-        });
-
-        let start_values = by_start.iter().map(|&idx| start_sec[idx]).collect();
-        // Spans are appended while iterating note-off events in sorted event order,
-        // so their end times are already nondecreasing.
-        let by_end: Vec<usize> = (0..spans.len()).collect();
-        let end_values = end_sec.clone();
+        let end_values = rows.by_end.iter().map(|&idx| rows.end_sec[idx]).collect();
 
         Self {
-            start_sec,
-            end_sec,
-            note,
-            velocity,
-            channel,
-            track,
-            by_start,
-            by_end,
-            start_values,
+            start_sec: rows.start_sec,
+            end_sec: rows.end_sec,
+            note: rows.note,
+            velocity: rows.velocity,
+            channel: rows.channel,
+            track: rows.track,
+            by_end: rows.by_end,
             end_values,
-            controls,
-            measure_times,
-            note_diag,
-            duration_sec,
+            controls: rows.controls,
+            measure_times: rows.measure_times,
+            note_diag: rows.note_diag,
+            duration_sec: rows.duration_sec,
             source_kind: "native-packed".to_string(),
         }
     }
@@ -330,12 +307,12 @@ impl NativePackedPlaybackSource {
     }
 
     fn visible_spans(&self, t0: f64, t1: f64) -> Vec<(u8, f64, f64, u8, u8, u32)> {
-        let i1 = upper_bound(&self.start_values, t1);
+        let i1 = upper_bound(&self.start_sec, t1);
         let j0 = lower_bound(&self.end_values, t0);
 
         if i1 <= (self.by_end.len().saturating_sub(j0)) {
             let mut out = Vec::with_capacity(i1);
-            for &idx in &self.by_start[..i1] {
+            for idx in 0..i1 {
                 if self.end_sec[idx] >= t0 {
                     out.push(self.span_tuple(idx));
                 }
@@ -576,17 +553,49 @@ fn load_packed_playback_source_native(
     flip_hi: Option<u8>,
 ) -> PyResult<NativePackedPlaybackSource> {
     let (ticks_per_qn, track_events) = parse_midi_file(midi_path)?;
-    let (mut spans, controls, measure_times, note_diag) =
+    let mut rows =
         build_native_rows_streaming(&track_events, ticks_per_qn, stuck_note_fix_mode);
     if midi_flip {
-        apply_midi_flip(&mut spans, flip_lo, flip_hi);
+        apply_midi_flip(&mut rows.note, flip_lo, flip_hi);
     }
-    Ok(NativePackedPlaybackSource::from_rows(
-        spans,
-        controls,
-        measure_times,
-        note_diag,
-    ))
+    Ok(NativePackedPlaybackSource::from_build_rows(rows))
+}
+
+#[pyfunction]
+#[pyo3(signature = (midi_path, stuck_note_fix_mode=None))]
+fn debug_native_profile_load(midi_path: &str, stuck_note_fix_mode: Option<&str>) -> PyResult<Py<PyDict>> {
+    let mode = stuck_note_fix_mode.unwrap_or("off");
+    let parse_started = Instant::now();
+    let (ticks_per_qn, track_events) = parse_midi_file(midi_path)?;
+    let parse_sec = parse_started.elapsed().as_secs_f64();
+
+    let track_count = track_events.len();
+    let event_count: usize = track_events.iter().map(Vec::len).sum();
+
+    let build_started = Instant::now();
+    let rows =
+        build_native_rows_streaming(&track_events, ticks_per_qn, mode);
+    let build_sec = build_started.elapsed().as_secs_f64();
+
+    Python::with_gil(|py| {
+        let out = PyDict::new(py);
+        out.set_item("parse_sec", parse_sec)?;
+        out.set_item("build_sec", build_sec)?;
+        out.set_item("total_sec", parse_sec + build_sec)?;
+        out.set_item("track_count", track_count)?;
+        out.set_item("event_count", event_count)?;
+        out.set_item("note_count", rows.note.len())?;
+        out.set_item("control_count", rows.controls.len())?;
+        out.set_item("measure_count", rows.measure_times.len())?;
+        out.set_item("stuck_note_fix_mode", i32::from(rows.note_diag.stuck_note_fix_mode))?;
+        out.set_item("overlap_fixes", rows.note_diag.overlap_fixes)?;
+        out.set_item("orphan_note_offs", rows.note_diag.orphan_note_offs)?;
+        out.set_item(
+            "remaining_unmatched_note_ons",
+            rows.note_diag.remaining_unmatched_note_ons,
+        )?;
+        Ok(out.unbind())
+    })
 }
 
 fn parse_midi_file(path: &str) -> PyResult<(u16, Vec<Vec<RawEvent>>)> {
@@ -775,29 +784,43 @@ fn build_native_rows_streaming(
     track_events: &[Vec<RawEvent>],
     ticks_per_qn: u16,
     stuck_note_fix_mode: &str,
-) -> (Vec<NativeSpan>, Vec<NativeControl>, Vec<f64>, NoteDiagnostics) {
+) -> NativeBuildRows {
     if ticks_per_qn == 0 {
-        return (
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            NoteDiagnostics {
+        return NativeBuildRows {
+            start_sec: Vec::new(),
+            end_sec: Vec::new(),
+            note: Vec::new(),
+            velocity: Vec::new(),
+            channel: Vec::new(),
+            track: Vec::new(),
+            by_end: Vec::new(),
+            controls: Vec::new(),
+            measure_times: Vec::new(),
+            note_diag: NoteDiagnostics {
                 stuck_note_fix_mode: 0,
                 overlap_fixes: 0,
                 orphan_note_offs: 0,
                 remaining_unmatched_note_ons: 0,
             },
-        );
+            duration_sec: 0.0,
+        };
     }
 
     let mode = normalize_stuck_note_fix_mode(stuck_note_fix_mode);
-    let mut spans: Vec<NativeSpan> = Vec::new();
+    let mut start_sec: Vec<f64> = Vec::new();
+    let mut end_sec: Vec<f64> = Vec::new();
+    let mut note: Vec<u8> = Vec::new();
+    let mut velocity: Vec<u8> = Vec::new();
+    let mut channel: Vec<u8> = Vec::new();
+    let mut track: Vec<u32> = Vec::new();
+    let mut by_end: Vec<usize> = Vec::new();
     let mut controls: Vec<NativeControl> = Vec::new();
     let mut measure_times: Vec<f64> = vec![0.0];
     let mut on_map: HashMap<(u32, u8, u8), VecDeque<ActiveNote>> = HashMap::new();
     let mut overlap_fixes = 0u64;
     let mut orphan_note_offs = 0u64;
     let mut max_tick = 0u64;
+    let mut duration_sec = 0.0f64;
 
     let mut current_tick = 0u64;
     let mut current_sec = 0.0f64;
@@ -853,22 +876,28 @@ fn build_native_rows_streaming(
                 });
             }
             EventKind::NoteOn => {
-                let note = event.note();
-                let channel = event.channel;
-                let velocity = event.velocity();
+                let note_value = event.note();
+                let channel_value = event.channel;
+                let velocity_value = event.velocity();
+                let span_idx = start_sec.len();
+                start_sec.push(current_sec);
+                end_sec.push(current_sec);
+                note.push(note_value);
+                velocity.push(velocity_value);
+                channel.push(channel_value);
+                track.push(event.track);
                 on_map
-                    .entry((event.track, channel, note))
+                    .entry((event.track, channel_value, note_value))
                     .or_default()
                     .push_back(ActiveNote {
                         start_tick: event.tick,
-                        start_sec: current_sec,
-                        velocity,
+                        span_idx,
                     });
             }
             EventKind::NoteOff => {
-                let note = event.note();
-                let channel = event.channel;
-                let Some(queue) = on_map.get_mut(&(event.track, channel, note)) else {
+                let note_value = event.note();
+                let channel_value = event.channel;
+                let Some(queue) = on_map.get_mut(&(event.track, channel_value, note_value)) else {
                     orphan_note_offs += 1;
                     continue;
                 };
@@ -885,14 +914,9 @@ fn build_native_rows_streaming(
                 if event.tick <= start_note.start_tick {
                     continue;
                 }
-                spans.push(NativeSpan {
-                    note,
-                    start: start_note.start_sec,
-                    end: current_sec,
-                    velocity: start_note.velocity,
-                    channel,
-                    track: event.track,
-                });
+                end_sec[start_note.span_idx] = current_sec;
+                by_end.push(start_note.span_idx);
+                duration_sec = duration_sec.max(current_sec);
             }
         }
 
@@ -912,15 +936,60 @@ fn build_native_rows_streaming(
     }
 
     let remaining_unmatched_note_ons = on_map.values().map(|q| q.len() as u64).sum();
-    spans.shrink_to_fit();
+    if remaining_unmatched_note_ons > 0 {
+        let mut remap = vec![usize::MAX; start_sec.len()];
+        let mut write = 0usize;
+        for read in 0..start_sec.len() {
+            if end_sec[read] <= start_sec[read] {
+                continue;
+            }
+            remap[read] = write;
+            if write != read {
+                start_sec[write] = start_sec[read];
+                end_sec[write] = end_sec[read];
+                note[write] = note[read];
+                velocity[write] = velocity[read];
+                channel[write] = channel[read];
+                track[write] = track[read];
+            }
+            write += 1;
+        }
+        start_sec.truncate(write);
+        end_sec.truncate(write);
+        note.truncate(write);
+        velocity.truncate(write);
+        channel.truncate(write);
+        track.truncate(write);
+        by_end.retain_mut(|idx| {
+            let mapped = remap[*idx];
+            if mapped == usize::MAX {
+                return false;
+            }
+            *idx = mapped;
+            true
+        });
+    }
+    start_sec.shrink_to_fit();
+    end_sec.shrink_to_fit();
+    note.shrink_to_fit();
+    velocity.shrink_to_fit();
+    channel.shrink_to_fit();
+    track.shrink_to_fit();
+    by_end.shrink_to_fit();
     controls.shrink_to_fit();
     measure_times.shrink_to_fit();
 
-    (
-        spans,
+    NativeBuildRows {
+        start_sec,
+        end_sec,
+        note,
+        velocity,
+        channel,
+        track,
+        by_end,
         controls,
         measure_times,
-        NoteDiagnostics {
+        note_diag: NoteDiagnostics {
             stuck_note_fix_mode: match mode {
                 "auto" => 1,
                 "lifo" => 2,
@@ -930,7 +999,8 @@ fn build_native_rows_streaming(
             orphan_note_offs,
             remaining_unmatched_note_ons,
         },
-    )
+        duration_sec,
+    }
 }
 
 fn bar_ticks_for_signature(numer: u32, denom: u32, ticks_per_qn: u16) -> u64 {
@@ -946,15 +1016,15 @@ fn normalize_stuck_note_fix_mode(value: &str) -> &'static str {
     }
 }
 
-fn apply_midi_flip(spans: &mut [NativeSpan], flip_lo: Option<u8>, flip_hi: Option<u8>) {
+fn apply_midi_flip(notes: &mut [u8], flip_lo: Option<u8>, flip_hi: Option<u8>) {
     let mut lo = flip_lo.unwrap_or(MIN_PIANO_NOTE);
     let mut hi = flip_hi.unwrap_or(MAX_PIANO_NOTE);
     if lo > hi {
         std::mem::swap(&mut lo, &mut hi);
     }
-    for span in spans.iter_mut() {
-        let flipped = (lo as i16) + (hi as i16) - (span.note as i16);
-        span.note = flipped.clamp(0, 127) as u8;
+    for note in notes.iter_mut() {
+        let flipped = (lo as i16) + (hi as i16) - (*note as i16);
+        *note = flipped.clamp(0, 127) as u8;
     }
 }
 
@@ -1106,5 +1176,6 @@ fn synthermia_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativePackedPlaybackSource>()?;
     m.add_function(wrap_pyfunction!(native_runtime_info, m)?)?;
     m.add_function(wrap_pyfunction!(load_packed_playback_source_native, m)?)?;
+    m.add_function(wrap_pyfunction!(debug_native_profile_load, m)?)?;
     Ok(())
 }
