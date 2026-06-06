@@ -105,6 +105,10 @@ def paint_str(row: List[str], x: int, text: str) -> None:
             row[xx] = ch
 
 
+def _flat_row_index(row: int, col: int, cols: int) -> int:
+    return (row * cols) + col
+
+
 # ---------------------------------------------------------------------------
 # ANSI color utilities
 # ---------------------------------------------------------------------------
@@ -310,6 +314,370 @@ def ornamental_fill(width: int, row: int = 0, phase: int = 0) -> str:
 # Main frame renderer
 # ---------------------------------------------------------------------------
 
+def _render_density_frame(
+    density_data: Dict[str, Sequence[object]],
+    t: float,
+    note_lo: int,
+    note_hi: int,
+    rows: int,
+    x_scale: int,
+    kb_y_scale: int,
+    kb_black_extra: int,
+    move_speed: float,
+    use_color: bool,
+    title: str,
+    progress: float,
+    track_colors: Optional[Dict[int, Tuple[int, int, int]]],
+    pressed_key_color_mode: str,
+    dynamics_full_velocity: float,
+    terminal_bg_rgb: Optional[Tuple[int, int, int]],
+    visual_glyphs: Optional[Dict[str, object]],
+    measure_times: Optional[Sequence[float]],
+) -> str:
+    black_rows, white_rows, kb_rows = keyboard_row_counts(kb_y_scale, kb_black_extra)
+    play_rows = rows - kb_rows
+    hit_row = play_rows - 1
+    cols = keyboard_width(note_lo, note_hi, x_scale)
+    canvas = make_canvas(rows, cols)
+    total_play_cells = play_rows * cols
+    note_track = [-1] * total_play_cells
+    note_velocity = [0] * total_play_cells
+    black_fall_mask = bytearray(total_play_cells)
+    default_white_note = (255, 80, 80)
+    pressed_mode = normalize_pressed_key_color_mode(pressed_key_color_mode)
+    term_bg_rgb = terminal_bg_rgb or detect_terminal_bg_rgb()
+    full_vel = max(1.0, min(127.0, float(dynamics_full_velocity)))
+    glyphs = normalize_visual_glyphs(visual_glyphs)
+    note_white_glyph = glyphs["glyph_note_white"]
+    note_pedal_black_mid = glyphs["glyph_note_pedal_black_mid"]
+    note_black_mid = glyphs["glyph_note_black_mid"]
+    piano_white_glyph = glyphs["glyph_piano_white"]
+    piano_black_left = glyphs["glyph_piano_black_left"]
+    piano_black_mid = glyphs["glyph_piano_black_mid"]
+    piano_black_right = glyphs["glyph_piano_black_right"]
+    white_w = white_key_width(x_scale)
+    black_key_w = black_key_width(x_scale)
+    palette_cache: Dict[Tuple[int, int, int], Tuple[Tuple[int, int, int], Tuple[int, int, int]]] = {}
+    active_tracks_by_note: Dict[int, List[int]] = {}
+    visible_tracks_by_note: Dict[int, List[int]] = {}
+    active_weighted_colors_by_note: Dict[int, List[Tuple[Tuple[int, int, int], float]]] = {}
+    active_notes = set()
+
+    def track_white_rgb(track_idx: int) -> Tuple[int, int, int]:
+        if track_colors and track_idx in track_colors:
+            return track_colors[track_idx]
+        return default_white_note
+
+    def pressed_tint(rgb: Tuple[int, int, int]) -> Tuple[int, int, int]:
+        base = (165, 165, 165)
+        alpha = 0.45
+        return (
+            int(round(base[0] * (1.0 - alpha) + rgb[0] * alpha)),
+            int(round(base[1] * (1.0 - alpha) + rgb[1] * alpha)),
+            int(round(base[2] * (1.0 - alpha) + rgb[2] * alpha)),
+        )
+
+    def blend_rgbs(colors: Sequence[Tuple[int, int, int]]) -> Tuple[int, int, int]:
+        if not colors:
+            return (165, 165, 165)
+        r = int(round(sum(c[0] for c in colors) / len(colors)))
+        g = int(round(sum(c[1] for c in colors) / len(colors)))
+        b = int(round(sum(c[2] for c in colors) / len(colors)))
+        return (r, g, b)
+
+    def blend_hue_weighted(weighted_colors: Sequence[Tuple[Tuple[int, int, int], float]]) -> Tuple[int, int, int]:
+        total_w = 0.0
+        hue_x = 0.0
+        hue_y = 0.0
+        sat_acc = 0.0
+        val_acc = 0.0
+        for rgb, w in weighted_colors:
+            weight = max(0.0, float(w))
+            if weight <= 0:
+                continue
+            r_f = max(0.0, min(1.0, rgb[0] / 255.0))
+            g_f = max(0.0, min(1.0, rgb[1] / 255.0))
+            b_f = max(0.0, min(1.0, rgb[2] / 255.0))
+            h, s, v = colorsys.rgb_to_hsv(r_f, g_f, b_f)
+            ang = h * (2.0 * math.pi)
+            hue_weight = weight * max(0.15, s)
+            hue_x += math.cos(ang) * hue_weight
+            hue_y += math.sin(ang) * hue_weight
+            sat_acc += s * weight
+            val_acc += v * weight
+            total_w += weight
+        if total_w <= 0:
+            return (165, 165, 165)
+        sat = sat_acc / total_w
+        val = val_acc / total_w
+        if abs(hue_x) < 1e-9 and abs(hue_y) < 1e-9:
+            den = sum(max(0.0, float(w)) for _rgb, w in weighted_colors)
+            if den <= 0:
+                return (165, 165, 165)
+            rr = int(round(sum(rgb[0] * max(0.0, float(w)) for rgb, w in weighted_colors) / den))
+            gg = int(round(sum(rgb[1] * max(0.0, float(w)) for rgb, w in weighted_colors) / den))
+            bb = int(round(sum(rgb[2] * max(0.0, float(w)) for rgb, w in weighted_colors) / den))
+            return _clamp_rgb_triplet(rr, gg, bb)
+        hue = (math.atan2(hue_y, hue_x) / (2.0 * math.pi)) % 1.0
+        r_m, g_m, b_m = colorsys.hsv_to_rgb(hue, sat, val)
+        return _clamp_rgb_triplet(int(round(r_m * 255)), int(round(g_m * 255)), int(round(b_m * 255)))
+
+    def add_unique_track(dst: Dict[int, List[int]], note: int, track_idx: int) -> None:
+        arr = dst.get(note)
+        if arr is None:
+            dst[note] = [track_idx]
+            return
+        if track_idx not in arr:
+            arr.append(track_idx)
+
+    def white_density_char(level: int) -> str:
+        if level <= 1:
+            return "·"
+        if level == 2:
+            return "░"
+        if level == 3:
+            return "▒"
+        return note_white_glyph
+
+    def black_density_char(level: int) -> str:
+        if level <= 2:
+            return note_pedal_black_mid
+        return note_black_mid
+
+    for note, trk, vel in density_data.get("active", ()):
+        note_i = int(note)
+        trk_i = int(trk)
+        active_notes.add(note_i)
+        add_unique_track(active_tracks_by_note, note_i, trk_i)
+        vel_w = max(1.0, float(max(1, int(vel))))
+        active_weighted_colors_by_note.setdefault(note_i, []).append((track_white_rgb(trk_i), vel_w))
+    for note, trk in density_data.get("visible", ()):
+        add_unique_track(visible_tracks_by_note, int(note), int(trk))
+    for x, y, trk, vel, is_black_cell, density in density_data.get("cells", ()):
+        xx = int(x)
+        yy = int(y)
+        if not (0 <= xx < cols and 0 <= yy < play_rows):
+            continue
+        idx = _flat_row_index(yy, xx, cols)
+        trk_i = int(trk)
+        vel_i = max(1, min(127, int(vel)))
+        note_track[idx] = trk_i
+        note_velocity[idx] = vel_i
+        dens = max(1, min(4, int(density)))
+        if bool(is_black_cell):
+            canvas[yy][xx] = black_density_char(dens)
+            black_fall_mask[idx] = 1
+        else:
+            canvas[yy][xx] = white_density_char(dens)
+
+    measure_rows: set[int] = set()
+    if measure_times:
+        window_sec = play_rows / move_speed
+        bar_t0 = t - 0.15
+        bar_t1 = t + window_sec + 0.1
+        m0 = bisect_left(measure_times, bar_t0)
+        m1 = bisect_left(measure_times, bar_t1)
+        for mt in measure_times[m0:m1]:
+            y_bar = int(math.floor(hit_row + (t - float(mt)) * move_speed))
+            if not (0 <= y_bar < play_rows):
+                continue
+            measure_rows.add(y_bar)
+            row = canvas[y_bar]
+            for x in range(cols):
+                if row[x] == " ":
+                    row[x] = "_"
+
+    key_bg_rgb = [[(245, 245, 245) for _ in range(cols)] for _ in range(kb_rows)]
+    black_key_fg_rgb: List[List[Optional[Tuple[int, int, int]]]] = [
+        [None for _ in range(cols)] for _ in range(black_rows)
+    ]
+    pressed_black_notes: List[int] = []
+    black_start = play_rows
+    white_start = black_start + black_rows
+
+    def pressed_row_colors(note: int, row_count: int) -> List[Tuple[int, int, int]]:
+        if row_count <= 0:
+            return []
+        if pressed_mode == "off":
+            return [(165, 165, 165)] * row_count
+        if pressed_mode == "weighted":
+            weighted_colors = active_weighted_colors_by_note.get(note, [])
+            if weighted_colors:
+                mixed = blend_hue_weighted(weighted_colors)
+                return [pressed_tint(mixed)] * row_count
+            return [(165, 165, 165)] * row_count
+        track_ids = visible_tracks_by_note.get(note) or active_tracks_by_note.get(note) or []
+        tint_sources = [track_white_rgb(trk) for trk in track_ids] if track_ids else []
+        if not tint_sources:
+            return [(165, 165, 165)] * row_count
+        if len(tint_sources) == 1:
+            return [pressed_tint(tint_sources[0])] * row_count
+        if row_count >= len(tint_sources):
+            return [pressed_tint(tint_sources[(ry * len(tint_sources)) // row_count]) for ry in range(row_count)]
+        return [pressed_tint(blend_rgbs(tint_sources))] * row_count
+
+    for n in range(note_lo, note_hi + 1):
+        x = note_x(n, x_scale)
+        pressed = n in active_notes
+        if is_white(n):
+            row_colors: List[Tuple[int, int, int]] = [(245, 245, 245)] * kb_rows
+            if pressed:
+                row_colors = pressed_row_colors(n, kb_rows)
+            for ry in range(kb_rows):
+                row_rgb = row_colors[ry]
+                for dx in range(white_w):
+                    xx = x + dx
+                    if 0 <= xx < cols:
+                        key_bg_rgb[ry][xx] = row_rgb
+            chunk = (("G" if pressed else "W") * white_w)
+            for ry in range(white_rows):
+                paint_str(canvas[white_start + ry], x, chunk)
+        else:
+            if black_key_w <= 1:
+                base_chunk = piano_black_mid
+                pressed_chunk = "P"
+            elif black_key_w == 2:
+                base_chunk = piano_black_left + piano_black_right
+                pressed_chunk = "LR"
+            else:
+                base_chunk = piano_black_left + (piano_black_mid * (black_key_w - 2)) + piano_black_right
+                pressed_chunk = "L" + ("P" * (black_key_w - 2)) + "R"
+            chunk = pressed_chunk if pressed else base_chunk
+            for ry in range(black_rows):
+                paint_str(canvas[black_start + ry], x, chunk)
+            if pressed:
+                pressed_black_notes.append(n)
+
+    for n in pressed_black_notes:
+        x = note_x(n, x_scale)
+        row_colors = pressed_row_colors(n, black_rows)
+        for ry in range(black_rows):
+            row_rgb = row_colors[ry]
+            for dx in range(black_key_w):
+                xx = x + dx
+                if 0 <= xx < cols:
+                    black_key_fg_rgb[ry][xx] = row_rgb
+
+    for n in range(note_lo, note_hi + 1):
+        if not is_white(n):
+            continue
+        x = note_x(n, x_scale)
+        pressed = n in active_notes
+        cap_ch = "U" if pressed else "T"
+        for ry in range(black_rows):
+            row = canvas[black_start + ry]
+            for dx in range(white_w):
+                xx = x + dx
+                if 0 <= xx < cols and row[xx] == " ":
+                    row[xx] = cap_ch
+
+    header = f"{title}  {int(progress * 100):3d}%  t={t:6.2f}s"
+    header = header[:cols].ljust(cols)
+    reset = ansi_color(use_color, "0")
+    lines: List[str] = [f"\x1b[97m{header}{reset}"] if use_color else [header]
+
+    def track_palette(track_idx: int, velocity: int) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
+        key = (int(track_idx), int(velocity), 255)
+        cached = palette_cache.get(key)
+        if cached is not None:
+            return cached
+        if track_colors and track_idx in track_colors:
+            base_white = track_colors[track_idx]
+        else:
+            base_white = default_white_note
+        base_dark = darken_rgb(base_white, 0.6)
+        alpha = velocity_color_alpha(int(velocity), full_vel)
+        white_rgb = blend_rgb(term_bg_rgb, base_white, alpha)
+        dark_rgb = blend_rgb(term_bg_rgb, base_dark, alpha)
+        palette_cache[key] = (white_rgb, dark_rgb)
+        return white_rgb, dark_rgb
+
+    for y in range(play_rows):
+        raw = "".join(canvas[y])
+        if use_color:
+            parts: List[str] = []
+            current_style = reset
+            clear_bg = ansi_color(use_color, "49")
+            row_offset = y * cols
+            for x, ch in enumerate(raw):
+                idx = row_offset + x
+                trk = note_track[idx]
+                if black_fall_mask[idx]:
+                    vel = note_velocity[idx]
+                    _white_rgb, dark_rgb = track_palette(trk, vel)
+                    style = ansi_fg_rgb(use_color, dark_rgb) + clear_bg
+                elif trk >= 0:
+                    vel = note_velocity[idx]
+                    white_rgb, _dark_rgb = track_palette(trk, vel)
+                    style = ansi_fg_rgb(use_color, white_rgb) + clear_bg
+                elif y in measure_rows and ch == "_":
+                    style = ansi_fg_rgb(use_color, (130, 130, 130)) + clear_bg
+                else:
+                    style = reset
+                if style != current_style:
+                    parts.append(style)
+                    current_style = style
+                parts.append(ch)
+            if current_style != reset:
+                parts.append(reset)
+            line = "".join(parts)
+        else:
+            line = raw
+        lines.append(line)
+
+    if use_color:
+        black_key_default = ansi_color(use_color, "30")
+        for row_idx in range(black_start, black_start + black_rows):
+            parts = []
+            raw = "".join(canvas[row_idx])
+            kb_ry = row_idx - black_start
+            for x, ch in enumerate(raw):
+                key_bg = ansi_bg_rgb(use_color, key_bg_rgb[kb_ry][x])
+                if ch == "L":
+                    fg_rgb = black_key_fg_rgb[kb_ry][x] or (165, 165, 165)
+                    parts.append(ansi_fg_rgb(use_color, fg_rgb) + key_bg + piano_black_left)
+                elif ch == "R":
+                    fg_rgb = black_key_fg_rgb[kb_ry][x] or (165, 165, 165)
+                    parts.append(ansi_fg_rgb(use_color, fg_rgb) + key_bg + piano_black_right)
+                elif ch == "P":
+                    fg_rgb = black_key_fg_rgb[kb_ry][x] or (165, 165, 165)
+                    parts.append(ansi_fg_rgb(use_color, fg_rgb) + key_bg + piano_black_mid)
+                elif ch in {"U", "T"}:
+                    parts.append(key_bg + " ")
+                elif ch in {piano_black_left, piano_black_right, piano_black_mid}:
+                    parts.append(black_key_default + key_bg + ch)
+                else:
+                    parts.append(ch)
+            lines.append("".join(parts) + reset)
+        for row_idx in range(white_start, white_start + white_rows):
+            parts = []
+            raw = "".join(canvas[row_idx])
+            kb_ry = row_idx - black_start
+            for x, ch in enumerate(raw):
+                if ch in {"G", "W"}:
+                    key_bg = ansi_bg_rgb(use_color, key_bg_rgb[kb_ry][x])
+                    parts.append(key_bg + " ")
+                else:
+                    parts.append(ch)
+            lines.append("".join(parts) + reset)
+    else:
+        for row_idx in range(black_start, black_start + black_rows):
+            raw = "".join(canvas[row_idx])
+            raw = (
+                raw.replace("L", piano_black_left)
+                .replace("R", piano_black_right)
+                .replace("P", piano_black_mid)
+                .replace("T", piano_white_glyph)
+                .replace("U", piano_white_glyph)
+            )
+            lines.append(raw)
+        for row_idx in range(white_start, white_start + white_rows):
+            raw = "".join(canvas[row_idx])
+            raw = raw.replace("W", piano_white_glyph).replace("G", piano_white_glyph)
+            lines.append(raw)
+
+    return "\n".join(lines)
+
 def render_frame(
     spans: Sequence[NoteSpan | PackedSpan],
     pedal_spans: Optional[Sequence[NoteSpan]],
@@ -336,6 +704,30 @@ def render_frame(
     note_direction: str = "down",
     density_data: Optional[Dict[str, Sequence[object]]] = None,
 ) -> str:
+    direction = str(note_direction or "down").strip().lower()
+    if direction not in {"down", "up"}:
+        direction = "down"
+    if density_data is not None and direction == "down" and not pedal_spans:
+        return _render_density_frame(
+            density_data=density_data,
+            t=t,
+            note_lo=note_lo,
+            note_hi=note_hi,
+            rows=rows,
+            x_scale=x_scale,
+            kb_y_scale=kb_y_scale,
+            kb_black_extra=kb_black_extra,
+            move_speed=move_speed,
+            use_color=use_color,
+            title=title,
+            progress=progress,
+            track_colors=track_colors,
+            pressed_key_color_mode=pressed_key_color_mode,
+            dynamics_full_velocity=dynamics_full_velocity,
+            terminal_bg_rgb=terminal_bg_rgb,
+            visual_glyphs=visual_glyphs,
+            measure_times=measure_times,
+        )
     black_rows, white_rows, kb_rows = keyboard_row_counts(kb_y_scale, kb_black_extra)
     play_rows = rows - kb_rows
     hit_row = play_rows - 1
@@ -464,9 +856,6 @@ def render_frame(
         if track_idx not in arr:
             arr.append(track_idx)
 
-    direction = str(note_direction or "down").strip().lower()
-    if direction not in {"down", "up"}:
-        direction = "down"
     window_sec = play_rows / move_speed
     if direction == "up":
         t0 = t - window_sec - 0.05
