@@ -1018,7 +1018,7 @@ def playback(
         ready_end = float(end_time)
         if pending_packed_task is not None:
             try:
-                ready_end = max(ready_end, float(pending_packed_task.seconds_ready()))
+                ready_end = max(ready_end, float(pending_packed_task.ready_duration_sec()))
             except Exception:
                 pass
         return max(0.0, ready_end)
@@ -1154,7 +1154,7 @@ def playback(
                 if pending_packed_task.done():
                     promote_pending_packed_source()
                 else:
-                    ready_sec = pending_packed_task.seconds_ready()
+                    ready_sec = pending_packed_task.ready_duration_sec()
                     current_end = float(end_time)
                     if ready_sec >= (current_end + PARTIAL_PROMOTE_AHEAD_MARGIN_SEC):
                         promote_pending_packed_source(allow_partial_refresh=True)

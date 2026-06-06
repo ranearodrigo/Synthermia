@@ -147,6 +147,20 @@ class BackgroundPlaybackLoadTask:
         except Exception:
             return 0.0
 
+    def ready_duration_sec(self) -> float:
+        partial = self.partial_result()
+        if partial is not None and partial.packed_source is not None:
+            try:
+                return max(0.0, float(partial.packed_source.duration_sec))
+            except Exception:
+                pass
+        if self._result is not None and self._result.packed_source is not None:
+            try:
+                return max(0.0, float(self._result.packed_source.duration_sec))
+            except Exception:
+                pass
+        return max(0.0, self.seconds_ready())
+
     def result(self) -> LoadedPlaybackData:
         self._thread.join()
         if self._error is not None:
@@ -203,7 +217,7 @@ class BackgroundPlaybackLoadTask:
                     partial.packed_source is not None
                     and float(partial.packed_source.duration_sec) >= target
                 )
-                or self.seconds_ready() >= target
+                or self.ready_duration_sec() >= target
             ):
                 return partial
             if self.done():
