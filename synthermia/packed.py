@@ -45,14 +45,27 @@ def native_packed_task_available() -> bool:
 PARTIAL_PACKED_START_BUFFER_SEC = 30.0
 PARTIAL_PACKED_START_BUFFER_REAL_SEC = 5.0
 PARTIAL_PACKED_START_BUFFER_MAX_SEC = 70.0
+PARTIAL_PACKED_START_BUFFER_HIGH_SPEED = 8.0
+PARTIAL_PACKED_START_BUFFER_EXTREME_REAL_SEC = 10.5
+PARTIAL_PACKED_START_BUFFER_EXTREME_MAX_SEC = 145.0
+PARTIAL_PACKED_MAX_SAFE_STARTUP_SPEED = 12.0
 
 
 def scaled_partial_start_buffer_sec(playback_speed: float) -> float:
     speed = max(0.1, float(playback_speed))
-    return max(
+    target = max(
         PARTIAL_PACKED_START_BUFFER_SEC,
         min(PARTIAL_PACKED_START_BUFFER_MAX_SEC, speed * PARTIAL_PACKED_START_BUFFER_REAL_SEC),
     )
+    if speed > PARTIAL_PACKED_START_BUFFER_HIGH_SPEED:
+        target = max(
+            target,
+            min(
+                PARTIAL_PACKED_START_BUFFER_EXTREME_MAX_SEC,
+                speed * PARTIAL_PACKED_START_BUFFER_EXTREME_REAL_SEC,
+            ),
+        )
+    return target
 
 
 def should_auto_use_packed(midi_path: str) -> bool:
@@ -67,6 +80,7 @@ def should_use_partial_packed_startup(
     midi_path: str,
     *,
     playback_engine: str,
+    playback_speed: float = 1.0,
     start_sec: float = 0.0,
     soundfont_path: str = "",
     pedal_visual_dots: bool = False,
@@ -76,6 +90,8 @@ def should_use_partial_packed_startup(
     if not native_packed_task_available():
         return False
     if float(start_sec) > 1e-9:
+        return False
+    if float(playback_speed) > PARTIAL_PACKED_MAX_SAFE_STARTUP_SPEED:
         return False
     if str(soundfont_path or "").strip():
         return False

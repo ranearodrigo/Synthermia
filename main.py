@@ -361,6 +361,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             use_partial_start = should_use_partial_packed_startup(
                 str(args.midi),
                 playback_engine=str(getattr(args, "playback_engine", "auto")),
+                playback_speed=float(getattr(args, "speed", 1.0)),
                 start_sec=float(getattr(args, "start", 0.0)),
                 soundfont_path=str(getattr(args, "soundfont", "")),
                 pedal_visual_dots=bool(getattr(args, "pedal_visual_dots", False)),
