@@ -42,12 +42,40 @@ def native_packed_task_available() -> bool:
     return callable(start_packed_playback_load_task_native)
 
 
+PARTIAL_PACKED_START_BUFFER_SEC = 20.0
+
+
 def should_auto_use_packed(midi_path: str) -> bool:
     try:
         size_bytes = os.path.getsize(midi_path)
     except OSError:
         return False
     return size_bytes >= (2 * 1024 * 1024)
+
+
+def should_use_partial_packed_startup(
+    midi_path: str,
+    *,
+    playback_engine: str,
+    start_sec: float = 0.0,
+    soundfont_path: str = "",
+    pedal_visual_dots: bool = False,
+) -> bool:
+    if resolve_playback_engine(playback_engine) == "python":
+        return False
+    if not native_packed_task_available():
+        return False
+    if float(start_sec) > 1e-9:
+        return False
+    if str(soundfont_path or "").strip():
+        return False
+    if bool(pedal_visual_dots):
+        return False
+    try:
+        size_bytes = os.path.getsize(midi_path)
+    except OSError:
+        return False
+    return size_bytes >= (8 * 1024 * 1024)
 
 
 @dataclass
@@ -60,6 +88,7 @@ class LoadedPlaybackData:
     engine_requested: str
     engine_used: str
     native_backend: bool
+    is_partial: bool = False
 
 
 class BackgroundPlaybackLoadTask:
@@ -67,6 +96,7 @@ class BackgroundPlaybackLoadTask:
         self._native_task = native_task
         self._done = False
         self._result: Optional[LoadedPlaybackData] = None
+        self._partial_result: Optional[LoadedPlaybackData] = None
         self._error: Optional[BaseException] = None
         self._thread = threading.Thread(target=self._collect_result, name="synthermia-native-load-wait", daemon=True)
         self._thread.start()
@@ -94,6 +124,7 @@ class BackgroundPlaybackLoadTask:
                 engine_requested="packed",
                 engine_used="packed",
                 native_backend=True,
+                is_partial=False,
             )
         except BaseException as exc:
             self._error = exc
@@ -109,6 +140,13 @@ class BackgroundPlaybackLoadTask:
         except Exception:
             return {"phase": "loading", "done": self.done()}
 
+    def seconds_ready(self) -> float:
+        snapshot = self.progress()
+        try:
+            return float(snapshot.get("seconds_ready", 0.0) or 0.0)
+        except Exception:
+            return 0.0
+
     def result(self) -> LoadedPlaybackData:
         self._thread.join()
         if self._error is not None:
@@ -116,6 +154,49 @@ class BackgroundPlaybackLoadTask:
         if self._result is None:
             raise RuntimeError("Background packed playback task produced no result")
         return self._result
+
+    def partial_result(self) -> Optional[LoadedPlaybackData]:
+        if self._partial_result is not None:
+            return self._partial_result
+        try:
+            native_source = self._native_task.partial_result()
+        except Exception:
+            return None
+        if native_source is None:
+            return None
+        native_controls = _coerce_control_events(native_source.control_tuples())
+        native_measure_times = [float(value) for value in native_source.measure_times()]
+        native_note_diag = {
+            key: int(value) for key, value in dict(native_source.note_diag()).items()
+        }
+        packed_source = PackedPlaybackSource.from_native(
+            native_source=native_source,
+            controls=native_controls,
+            measure_times=native_measure_times,
+            note_diag=native_note_diag,
+        )
+        self._partial_result = LoadedPlaybackData(
+            spans=None,
+            controls=native_controls,
+            measure_times=native_measure_times,
+            note_diag=native_note_diag,
+            packed_source=packed_source,
+            engine_requested="packed",
+            engine_used="packed",
+            native_backend=True,
+            is_partial=True,
+        )
+        return self._partial_result
+
+    def wait_until_ready(self, minimum_ready_sec: float, *, poll_interval: float = 0.05) -> LoadedPlaybackData:
+        target = max(0.0, float(minimum_ready_sec))
+        while True:
+            partial = self.partial_result()
+            if partial is not None and (target <= 0.0 or self.seconds_ready() >= target):
+                return partial
+            if self.done():
+                return self.result()
+            time.sleep(max(0.01, float(poll_interval)))
 
 
 class PackedPlaybackSource:
@@ -321,6 +402,7 @@ def start_background_packed_playback_load(
     stuck_note_fix_mode: str = "off",
     midi_flip: bool = False,
     flip_bounds: Optional[Tuple[int, int]] = None,
+    initial_ready_sec: Optional[float] = None,
 ) -> BackgroundPlaybackLoadTask:
     if not native_packed_task_available():
         raise RuntimeError("Native packed background load task is unavailable")
@@ -335,6 +417,7 @@ def start_background_packed_playback_load(
         bool(midi_flip),
         flip_lo,
         flip_hi,
+        None if initial_ready_sec is None else float(initial_ready_sec),
     )
     return BackgroundPlaybackLoadTask(native_task)
 

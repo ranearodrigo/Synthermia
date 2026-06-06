@@ -57,11 +57,14 @@ from synthermia.models import (
     _LiveMidiEvent,
 )
 from synthermia.packed import (
+    BackgroundPlaybackLoadTask,
+    PARTIAL_PACKED_START_BUFFER_SEC,
     PackedPlaybackSource,
     load_selected_playback_data,
     native_packed_task_available,
     resolve_playback_engine,
     should_auto_use_packed,
+    should_use_partial_packed_startup,
     start_background_packed_playback_load,
 )
 from synthermia.render import (
@@ -543,6 +546,7 @@ def playback(
     controls: Optional[Sequence[ControlEvent]] = None,
     measure_times: Optional[Sequence[float]] = None,
     packed_source: Optional[PackedPlaybackSource] = None,
+    pending_packed_task: Optional[BackgroundPlaybackLoadTask] = None,
 ) -> None:
     spans_active = list(spans or [])
     if (not spans_active) and packed_source is None:
@@ -675,7 +679,7 @@ def playback(
         nonlocal audio_spans, channel_programs, channel_soundfonts, source_channels, track_default_channels, audio_controls
         nonlocal start_time, end_time, frame_dt, title, use_offpiano_pattern, audio_gain
         nonlocal audio_engine, audio_engine_active, play_t, clock_anchor_t, clock_anchor_perf, paused
-        nonlocal py_audio, audio_proc, audio_temp_midi, audio_cache_key
+        nonlocal py_audio, audio_proc, audio_temp_midi, audio_cache_key, pending_packed_task
 
         midi_path = str(getattr(args, "midi", "")).strip()
         if not midi_path or not os.path.exists(midi_path):
@@ -694,19 +698,38 @@ def playback(
 
         if show_loading_popup and _should_use_loading_popup_for_args(args):
             if native_packed_task_available():
+                use_partial_start = should_use_partial_packed_startup(
+                    midi_path,
+                    playback_engine=str(getattr(args, "playback_engine", "auto")),
+                    start_sec=float(resume_t),
+                    soundfont_path=str(getattr(args, "soundfont", "")),
+                    pedal_visual_dots=bool(getattr(args, "pedal_visual_dots", False)),
+                )
                 native_task = start_background_packed_playback_load(
                     midi_path,
                     stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "off")),
                     midi_flip=bool(getattr(args, "midi_flip", False)),
                     flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+                    initial_ready_sec=PARTIAL_PACKED_START_BUFFER_SEC if use_partial_start else None,
                 )
-                loaded = run_background_task_popup(
-                    " Loading MIDI ",
-                    "Refreshing packed playback data.\nLarge black MIDI files may take a while.",
-                    native_task.result,
-                    detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
-                    progress_fn=native_task.progress,
-                )
+                if use_partial_start:
+                    loaded = run_background_task_popup(
+                        " Loading MIDI ",
+                        "Preparing the first playable packed buffer.\nThe rest of the timeline will keep building in the background.",
+                        lambda: native_task.wait_until_ready(PARTIAL_PACKED_START_BUFFER_SEC),
+                        detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
+                        progress_fn=native_task.progress,
+                    )
+                    pending_packed_task = native_task if loaded.is_partial and not native_task.done() else None
+                else:
+                    loaded = run_background_task_popup(
+                        " Loading MIDI ",
+                        "Refreshing packed playback data.\nLarge black MIDI files may take a while.",
+                        native_task.result,
+                        detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
+                        progress_fn=native_task.progress,
+                    )
+                    pending_packed_task = None
             else:
                 loaded = run_background_task_popup(
                     " Loading MIDI ",
@@ -714,8 +737,10 @@ def playback(
                     load_playback_data,
                     detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
                 )
+                pending_packed_task = None
         else:
             loaded = load_playback_data()
+            pending_packed_task = None
         spans_active = list(loaded.spans or [])
         controls_src = loaded.controls
         measure_times_src = loaded.measure_times
@@ -950,6 +975,34 @@ def playback(
         audio_temp_midi = None
         audio_cache_key = None
 
+    def promote_pending_packed_source(*, force_wait: bool = False) -> bool:
+        nonlocal pending_packed_task, controls_src, measure_times_src, packed_source_active, end_time
+        if pending_packed_task is None:
+            return False
+        if not pending_packed_task.done():
+            if not force_wait:
+                return False
+            loaded = run_background_task_popup(
+                " Buffering MIDI ",
+                "Preparing the remaining packed playback data.",
+                pending_packed_task.result,
+                detail_prefix="Finishing native build",
+                progress_fn=pending_packed_task.progress,
+            )
+        else:
+            loaded = pending_packed_task.result()
+        if loaded.packed_source is None:
+            pending_packed_task = None
+            return False
+        controls_src = list(loaded.controls or [])
+        if bool(getattr(args, "disable_pedal", False)):
+            controls_src = [ev for ev in controls_src if int(getattr(ev, "controller", -1)) != 64]
+        measure_times_src = list(loaded.measure_times or [])
+        packed_source_active = loaded.packed_source
+        end_time = float(packed_source_active.duration_sec)
+        pending_packed_task = None
+        return True
+
 
     _safe_stdout_write("\x1b[2J\x1b[H\x1b[?25l")
 
@@ -1030,6 +1083,16 @@ def playback(
                         sync_audio_to_time(play_t)
                 elif key in {"q", "Q"}:
                     return
+
+            if pending_packed_task is not None:
+                if pending_packed_task.done():
+                    promote_pending_packed_source()
+                elif (not paused) and play_t >= max(0.0, end_time - 0.5):
+                    paused = True
+                    stop_audio_only()
+                    promote_pending_packed_source(force_wait=True)
+                    sync_audio_to_time(play_t)
+                    paused = False
 
             t = play_t
             if (not paused) and t > end_time + 1.0:

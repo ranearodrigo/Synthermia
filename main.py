@@ -19,10 +19,12 @@ from synthermia.config import (
 )
 from synthermia.midi import normalize_stuck_note_fix_mode
 from synthermia.packed import (
+    PARTIAL_PACKED_START_BUFFER_SEC,
     load_selected_playback_data,
     native_packed_task_available,
     resolve_playback_engine,
     should_auto_use_packed,
+    should_use_partial_packed_startup,
     start_background_packed_playback_load,
 )
 from synthermia.playback import list_midi_input_ports, playback, playback_live_midi_input
@@ -353,21 +355,41 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 playback_engine=str(getattr(args, "playback_engine", "auto")),
             )
 
+        pending_packed_task = None
         if _should_use_loading_popup(args, from_config_screen=loaded_from_config_screen):
             if native_packed_task_available():
+                use_partial_start = should_use_partial_packed_startup(
+                    str(args.midi),
+                    playback_engine=str(getattr(args, "playback_engine", "auto")),
+                    start_sec=float(getattr(args, "start", 0.0)),
+                    soundfont_path=str(getattr(args, "soundfont", "")),
+                    pedal_visual_dots=bool(getattr(args, "pedal_visual_dots", False)),
+                )
                 native_task = start_background_packed_playback_load(
                     str(args.midi),
                     stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
                     midi_flip=bool(getattr(args, "midi_flip", False)),
                     flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+                    initial_ready_sec=PARTIAL_PACKED_START_BUFFER_SEC if use_partial_start else None,
                 )
-                loaded = run_background_task_popup(
-                    " Loading MIDI ",
-                    "Preparing packed playback data.\nLarge black MIDI files may take a while.",
-                    native_task.result,
-                    detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
-                    progress_fn=native_task.progress,
-                )
+                if use_partial_start:
+                    loaded = run_background_task_popup(
+                        " Loading MIDI ",
+                        "Preparing the first playable packed buffer.\nThe rest of the timeline will keep building in the background.",
+                        lambda: native_task.wait_until_ready(PARTIAL_PACKED_START_BUFFER_SEC),
+                        detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
+                        progress_fn=native_task.progress,
+                    )
+                    if loaded.is_partial and not native_task.done():
+                        pending_packed_task = native_task
+                else:
+                    loaded = run_background_task_popup(
+                        " Loading MIDI ",
+                        "Preparing packed playback data.\nLarge black MIDI files may take a while.",
+                        native_task.result,
+                        detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
+                        progress_fn=native_task.progress,
+                    )
             else:
                 loaded = run_background_task_popup(
                     " Loading MIDI ",
@@ -384,7 +406,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         overlap_fixes = int(note_diag.get("overlap_fixes", 0))
         orphan_offs = int(note_diag.get("orphan_note_offs", 0))
         unmatched_ons = int(note_diag.get("remaining_unmatched_note_ons", 0))
-        if str(getattr(args, "stuck_note_fix", "off")) != "off" and (overlap_fixes > 0 or orphan_offs > 0):
+        if (
+            (not loaded.is_partial)
+            and str(getattr(args, "stuck_note_fix", "off")) != "off"
+            and (overlap_fixes > 0 or orphan_offs > 0)
+        ):
             print(
                 f"MIDI cleanup: fixed {overlap_fixes} overlap(s), "
                 f"saw {orphan_offs} orphan note-off(s), {unmatched_ons} unmatched note-on(s) remain.",
@@ -426,6 +452,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             controls=controls,
             measure_times=measure_times,
             packed_source=loaded.packed_source,
+            pending_packed_task=pending_packed_task,
         )
         return 0
     except KeyboardInterrupt:

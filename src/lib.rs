@@ -141,9 +141,11 @@ struct LoadProgressState {
     tracks_done: usize,
     events_total: usize,
     events_processed: usize,
+    seconds_ready: f64,
     notes_ready: usize,
     controls_ready: usize,
     measures_ready: usize,
+    partial_result: Option<NativePackedPlaybackSource>,
     done: bool,
     result: Option<NativePackedPlaybackSource>,
     error: Option<String>,
@@ -157,9 +159,11 @@ impl LoadProgressState {
             tracks_done: 0,
             events_total: 0,
             events_processed: 0,
+            seconds_ready: 0.0,
             notes_ready: 0,
             controls_ready: 0,
             measures_ready: 0,
+            partial_result: None,
             done: false,
             result: None,
             error: None,
@@ -173,6 +177,7 @@ struct NativePackedLoadTask {
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
+#[derive(Clone)]
 #[pyclass(module = "synthermia_native")]
 struct NativePackedPlaybackSource {
     start_sec: Vec<f64>,
@@ -296,6 +301,7 @@ struct NativeBuildRows {
 #[derive(Clone, Copy)]
 struct BuildProgress {
     events_processed: usize,
+    seconds_ready: f64,
     note_count: usize,
     control_count: usize,
     measure_count: usize,
@@ -491,6 +497,7 @@ impl NativePackedLoadTask {
         out.set_item("tracks_done", state.tracks_done)?;
         out.set_item("events_total", state.events_total)?;
         out.set_item("events_processed", state.events_processed)?;
+        out.set_item("seconds_ready", state.seconds_ready)?;
         out.set_item("notes_ready", state.notes_ready)?;
         out.set_item("controls_ready", state.controls_ready)?;
         out.set_item("measures_ready", state.measures_ready)?;
@@ -501,16 +508,18 @@ impl NativePackedLoadTask {
         Ok(out)
     }
 
-    fn result(&self) -> PyResult<NativePackedPlaybackSource> {
-        if let Some(handle) = self
+    fn result(&self, py: Python<'_>) -> PyResult<NativePackedPlaybackSource> {
+        let handle = self
             .handle
             .lock()
             .map_err(|_| PyValueError::new_err("Packed load task handle poisoned"))?
-            .take()
-        {
-            handle
-                .join()
-                .map_err(|_| PyValueError::new_err("Packed load task thread panicked"))?;
+            .take();
+        if let Some(handle) = handle {
+            py.allow_threads(move || {
+                handle
+                    .join()
+                    .map_err(|_| PyValueError::new_err("Packed load task thread panicked"))
+            })?;
         }
         let mut state = self
             .state
@@ -523,6 +532,14 @@ impl NativePackedLoadTask {
             .result
             .take()
             .ok_or_else(|| PyValueError::new_err("Packed load task result is not ready"))
+    }
+
+    fn partial_result(&self) -> PyResult<Option<NativePackedPlaybackSource>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| PyValueError::new_err("Packed load task state poisoned"))?;
+        Ok(state.partial_result.clone())
     }
 }
 
@@ -648,13 +665,14 @@ fn native_runtime_info() -> &'static str {
 }
 
 #[pyfunction]
-#[pyo3(signature = (midi_path, stuck_note_fix_mode="off", midi_flip=false, flip_lo=None, flip_hi=None))]
+#[pyo3(signature = (midi_path, stuck_note_fix_mode="off", midi_flip=false, flip_lo=None, flip_hi=None, initial_ready_sec=None))]
 fn start_packed_playback_load_task_native(
     midi_path: &str,
     stuck_note_fix_mode: &str,
     midi_flip: bool,
     flip_lo: Option<u8>,
     flip_hi: Option<u8>,
+    initial_ready_sec: Option<f64>,
 ) -> NativePackedLoadTask {
     let state = Arc::new(Mutex::new(LoadProgressState::new()));
     let handle_state = Arc::clone(&state);
@@ -670,20 +688,30 @@ fn start_packed_playback_load_task_native(
                 let mut progress = handle_state
                     .lock()
                     .map_err(|_| PyValueError::new_err("Packed load task state poisoned"))?;
-                progress.phase = "building";
-                progress.events_processed = 0;
-                progress.notes_ready = 0;
-                progress.controls_ready = 0;
-                progress.measures_ready = 0;
+            progress.phase = "building";
+            progress.events_processed = 0;
+            progress.seconds_ready = 0.0;
+            progress.notes_ready = 0;
+            progress.controls_ready = 0;
+            progress.measures_ready = 0;
             }
             let mut rows = build_native_rows_streaming(
                 &track_events,
                 ticks_per_qn,
                 &stuck_note_fix_mode,
+                initial_ready_sec,
+                |source| {
+                    if let Ok(mut progress) = handle_state.lock() {
+                        if progress.partial_result.is_none() {
+                            progress.partial_result = Some(source);
+                        }
+                    }
+                },
                 |snapshot| {
                     if let Ok(mut progress) = handle_state.lock() {
                         progress.phase = "building";
                         progress.events_processed = snapshot.events_processed;
+                        progress.seconds_ready = snapshot.seconds_ready;
                         progress.notes_ready = snapshot.note_count;
                         progress.controls_ready = snapshot.control_count;
                         progress.measures_ready = snapshot.measure_count;
@@ -698,6 +726,7 @@ fn start_packed_playback_load_task_native(
                     .lock()
                     .map_err(|_| PyValueError::new_err("Packed load task state poisoned"))?;
                 progress.phase = "finalizing";
+                progress.seconds_ready = rows.duration_sec;
                 progress.notes_ready = rows.note.len();
                 progress.controls_ready = rows.controls.len();
                 progress.measures_ready = rows.measure_times.len();
@@ -740,8 +769,14 @@ fn load_packed_playback_source_native(
     let stuck_note_fix_mode = stuck_note_fix_mode.to_owned();
     py.allow_threads(move || {
         let (ticks_per_qn, track_events) = parse_midi_file(&midi_path)?;
-        let mut rows =
-            build_native_rows_streaming(&track_events, ticks_per_qn, &stuck_note_fix_mode, |_| {});
+        let mut rows = build_native_rows_streaming(
+            &track_events,
+            ticks_per_qn,
+            &stuck_note_fix_mode,
+            None,
+            |_| {},
+            |_| {},
+        );
         if midi_flip {
             apply_midi_flip(&mut rows.note, flip_lo, flip_hi);
         }
@@ -767,8 +802,14 @@ fn debug_native_profile_load(
         let event_count: usize = track_events.iter().map(Vec::len).sum();
 
         let build_started = Instant::now();
-        let rows =
-            build_native_rows_streaming(&track_events, ticks_per_qn, &mode, |_| {});
+        let rows = build_native_rows_streaming(
+            &track_events,
+            ticks_per_qn,
+            &mode,
+            None,
+            |_| {},
+            |_| {},
+        );
         let build_sec = build_started.elapsed().as_secs_f64();
         Ok((parse_sec, build_sec, track_count, event_count, rows))
     })?;
@@ -812,6 +853,7 @@ fn parse_midi_file_with_progress(
             progress.tracks_total = tracks_total;
             progress.tracks_done = tracks_done;
             progress.events_total = events_total;
+            progress.seconds_ready = 0.0;
         }
     })
 }
@@ -1003,6 +1045,8 @@ fn build_native_rows_streaming<F>(
     track_events: &[Vec<RawEvent>],
     ticks_per_qn: u16,
     stuck_note_fix_mode: &str,
+    initial_ready_sec: Option<f64>,
+    mut partial_ready_cb: impl FnMut(NativePackedPlaybackSource),
     mut progress_cb: F,
 ) -> NativeBuildRows
 where
@@ -1056,6 +1100,10 @@ where
     let mut sec_per_tick = (tempo_us_per_qn as f64) / 1_000_000.0 / (ticks_per_qn as f64);
     let mut processed_events = 0usize;
     let mut next_progress_report = 250_000usize;
+    let ready_target_sec = initial_ready_sec
+        .map(|value| if value.is_finite() { value.max(0.0) } else { 0.0 })
+        .filter(|value| *value > 0.0);
+    let mut partial_emitted = false;
 
     let mut current_bar_ticks = bar_ticks_for_signature(4, 4, ticks_per_qn);
     let mut next_measure_tick = current_bar_ticks;
@@ -1154,8 +1202,28 @@ where
         }
 
         if processed_events >= next_progress_report {
+            if !partial_emitted && ready_target_sec.map(|target| current_sec >= target).unwrap_or(false) {
+                partial_ready_cb(build_partial_ready_source(
+                    &start_sec,
+                    &end_sec,
+                    &note,
+                    &velocity,
+                    &channel,
+                    &track,
+                    &by_end,
+                    &controls,
+                    &measure_times,
+                    &active_slots,
+                    current_sec,
+                    mode,
+                    overlap_fixes,
+                    orphan_note_offs,
+                ));
+                partial_emitted = true;
+            }
             progress_cb(BuildProgress {
                 events_processed: processed_events,
+                seconds_ready: current_sec,
                 note_count: by_end.len(),
                 control_count: controls.len(),
                 measure_count: measure_times.len(),
@@ -1222,8 +1290,28 @@ where
     controls.shrink_to_fit();
     measure_times.shrink_to_fit();
 
+    if !partial_emitted && ready_target_sec.map(|target| duration_sec.max(current_sec) >= target).unwrap_or(false) {
+        partial_ready_cb(build_partial_ready_source(
+            &start_sec,
+            &end_sec,
+            &note,
+            &velocity,
+            &channel,
+            &track,
+            &by_end,
+            &controls,
+            &measure_times,
+            &active_slots,
+            duration_sec.max(current_sec),
+            mode,
+            overlap_fixes,
+            orphan_note_offs,
+        ));
+    }
+
     progress_cb(BuildProgress {
         events_processed: processed_events,
+        seconds_ready: duration_sec.max(current_sec),
         note_count: by_end.len(),
         control_count: controls.len(),
         measure_count: measure_times.len(),
@@ -1251,6 +1339,93 @@ where
         },
         duration_sec,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_partial_ready_source(
+    start_sec: &[f64],
+    end_sec: &[f64],
+    note: &[u8],
+    velocity: &[u8],
+    channel: &[u8],
+    track: &[u32],
+    by_end: &[usize],
+    controls: &[NativeControl],
+    measure_times: &[f64],
+    active_slots: &[VecDeque<ActiveNote>],
+    current_sec: f64,
+    mode: &str,
+    overlap_fixes: u64,
+    orphan_note_offs: u64,
+) -> NativePackedPlaybackSource {
+    let active_count: usize = active_slots.iter().map(VecDeque::len).sum();
+    let mut out_start = start_sec.to_vec();
+    let mut out_end = end_sec.to_vec();
+    let mut out_note = note.to_vec();
+    let mut out_velocity = velocity.to_vec();
+    let mut out_channel = channel.to_vec();
+    let mut out_track = track.to_vec();
+    let mut out_by_end = by_end.to_vec();
+    out_start.reserve(active_count);
+    out_end.reserve(active_count);
+    out_note.reserve(active_count);
+    out_velocity.reserve(active_count);
+    out_channel.reserve(active_count);
+    out_track.reserve(active_count);
+    out_by_end.reserve(active_count);
+
+    for queue in active_slots {
+        for active in queue {
+            let idx = active.span_idx;
+            if idx >= start_sec.len() {
+                continue;
+            }
+            let start = start_sec[idx];
+            if current_sec <= start {
+                continue;
+            }
+            let new_idx = out_start.len();
+            out_start.push(start);
+            out_end.push(current_sec);
+            out_note.push(note[idx]);
+            out_velocity.push(velocity[idx]);
+            out_channel.push(channel[idx]);
+            out_track.push(track[idx]);
+            out_by_end.push(new_idx);
+        }
+    }
+
+    out_by_end.sort_by(|a, b| {
+        out_end[*a]
+            .partial_cmp(&out_end[*b])
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| out_start[*a].partial_cmp(&out_start[*b]).unwrap_or(Ordering::Equal))
+            .then_with(|| out_note[*a].cmp(&out_note[*b]))
+            .then_with(|| out_channel[*a].cmp(&out_channel[*b]))
+    });
+
+    NativePackedPlaybackSource::from_build_rows(NativeBuildRows {
+        start_sec: out_start,
+        end_sec: out_end,
+        note: out_note,
+        velocity: out_velocity,
+        channel: out_channel,
+        track: out_track,
+        by_end: out_by_end,
+        controls: controls.to_vec(),
+        measure_times: measure_times.to_vec(),
+        note_diag: NoteDiagnostics {
+            stuck_note_fix_mode: match mode {
+                "auto" => 1,
+                "lifo" => 2,
+                _ => 0,
+            },
+            overlap_fixes,
+            orphan_note_offs,
+            remaining_unmatched_note_ons: active_count as u64,
+        },
+        duration_sec: current_sec.max(0.0),
+    })
 }
 
 fn bar_ticks_for_signature(numer: u32, denom: u32, ticks_per_qn: u16) -> u64 {

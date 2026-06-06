@@ -194,6 +194,9 @@ def run_background_task_popup(
             events_total = int(snapshot.get("events_total", 0) or 0)
             if events_total > 0:
                 detail_parts.append(f"Events: {events_processed}/{events_total}")
+            seconds_ready = float(snapshot.get("seconds_ready", 0.0) or 0.0)
+            if seconds_ready > 0.0:
+                detail_parts.append(f"Ready: {seconds_ready:.1f}s")
             notes_ready = int(snapshot.get("notes_ready", 0) or 0)
             if notes_ready > 0:
                 detail_parts.append(f"Notes: {notes_ready}")
