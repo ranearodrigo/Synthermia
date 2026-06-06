@@ -356,40 +356,48 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
 
         pending_packed_task = None
-        if _should_use_loading_popup(args, from_config_screen=loaded_from_config_screen):
-            if native_packed_task_available():
-                use_partial_start = should_use_partial_packed_startup(
-                    str(args.midi),
-                    playback_engine=str(getattr(args, "playback_engine", "auto")),
-                    start_sec=float(getattr(args, "start", 0.0)),
-                    soundfont_path=str(getattr(args, "soundfont", "")),
-                    pedal_visual_dots=bool(getattr(args, "pedal_visual_dots", False)),
+        use_partial_start = should_use_partial_packed_startup(
+            str(args.midi),
+            playback_engine=str(getattr(args, "playback_engine", "auto")),
+            start_sec=float(getattr(args, "start", 0.0)),
+            soundfont_path=str(getattr(args, "soundfont", "")),
+            pedal_visual_dots=bool(getattr(args, "pedal_visual_dots", False)),
+        )
+        if use_partial_start and native_packed_task_available():
+            native_task = start_background_packed_playback_load(
+                str(args.midi),
+                stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
+                midi_flip=bool(getattr(args, "midi_flip", False)),
+                flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+                initial_ready_sec=PARTIAL_PACKED_START_BUFFER_SEC,
+            )
+            if _should_use_loading_popup(args, from_config_screen=loaded_from_config_screen):
+                loaded = run_background_task_popup(
+                    " Loading MIDI ",
+                    "Preparing the first playable packed buffer.\nThe rest of the timeline will keep building in the background.",
+                    lambda: native_task.wait_until_ready(PARTIAL_PACKED_START_BUFFER_SEC),
+                    detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
+                    progress_fn=native_task.progress,
                 )
+            else:
+                loaded = native_task.wait_until_ready(PARTIAL_PACKED_START_BUFFER_SEC)
+            if loaded.is_partial and not native_task.done():
+                pending_packed_task = native_task
+        elif _should_use_loading_popup(args, from_config_screen=loaded_from_config_screen):
+            if native_packed_task_available():
                 native_task = start_background_packed_playback_load(
                     str(args.midi),
                     stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
                     midi_flip=bool(getattr(args, "midi_flip", False)),
                     flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
-                    initial_ready_sec=PARTIAL_PACKED_START_BUFFER_SEC if use_partial_start else None,
                 )
-                if use_partial_start:
-                    loaded = run_background_task_popup(
-                        " Loading MIDI ",
-                        "Preparing the first playable packed buffer.\nThe rest of the timeline will keep building in the background.",
-                        lambda: native_task.wait_until_ready(PARTIAL_PACKED_START_BUFFER_SEC),
-                        detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
-                        progress_fn=native_task.progress,
-                    )
-                    if loaded.is_partial and not native_task.done():
-                        pending_packed_task = native_task
-                else:
-                    loaded = run_background_task_popup(
-                        " Loading MIDI ",
-                        "Preparing packed playback data.\nLarge black MIDI files may take a while.",
-                        native_task.result,
-                        detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
-                        progress_fn=native_task.progress,
-                    )
+                loaded = run_background_task_popup(
+                    " Loading MIDI ",
+                    "Preparing packed playback data.\nLarge black MIDI files may take a while.",
+                    native_task.result,
+                    detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
+                    progress_fn=native_task.progress,
+                )
             else:
                 loaded = run_background_task_popup(
                     " Loading MIDI ",
