@@ -143,6 +143,7 @@ struct LoadProgressState {
     events_total: usize,
     events_processed: usize,
     seconds_ready: f64,
+    published_ready_duration: f64,
     notes_ready: usize,
     controls_ready: usize,
     measures_ready: usize,
@@ -161,6 +162,7 @@ impl LoadProgressState {
             events_total: 0,
             events_processed: 0,
             seconds_ready: 0.0,
+            published_ready_duration: 0.0,
             notes_ready: 0,
             controls_ready: 0,
             measures_ready: 0,
@@ -506,6 +508,7 @@ impl NativePackedLoadTask {
         out.set_item("events_total", state.events_total)?;
         out.set_item("events_processed", state.events_processed)?;
         out.set_item("seconds_ready", state.seconds_ready)?;
+        out.set_item("published_ready_duration", state.published_ready_duration)?;
         out.set_item("notes_ready", state.notes_ready)?;
         out.set_item("controls_ready", state.controls_ready)?;
         out.set_item("measures_ready", state.measures_ready)?;
@@ -714,6 +717,7 @@ fn start_packed_playback_load_task_native(
                 progress.phase = "building";
                 progress.events_processed = 0;
                 progress.seconds_ready = 0.0;
+                progress.published_ready_duration = 0.0;
                 progress.notes_ready = 0;
                 progress.controls_ready = 0;
                 progress.measures_ready = 0;
@@ -732,6 +736,7 @@ fn start_packed_playback_load_task_native(
                             .map(|existing| source.duration_sec > (existing.duration_sec + 1e-9))
                             .unwrap_or(true);
                         if replace {
+                            progress.published_ready_duration = source.duration_sec;
                             progress.partial_result = Some(source);
                         }
                     }
@@ -759,6 +764,7 @@ fn start_packed_playback_load_task_native(
                     .map_err(|_| PyValueError::new_err("Packed load task state poisoned"))?;
                 progress.phase = "finalizing";
                 progress.seconds_ready = rows.duration_sec;
+                progress.published_ready_duration = rows.duration_sec;
                 progress.notes_ready = rows.note.len();
                 progress.controls_ready = rows.controls.len();
                 progress.measures_ready = rows.measure_times.len();
@@ -771,6 +777,7 @@ fn start_packed_playback_load_task_native(
                 Ok(source) => {
                     progress.phase = "complete";
                     progress.done = true;
+                    progress.published_ready_duration = source.duration_sec;
                     progress.result = Some(source);
                 }
                 Err(err) => {
