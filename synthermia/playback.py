@@ -95,6 +95,7 @@ PARTIAL_BUFFER_RESUME_AHEAD_REAL_SEC = 0.9
 PARTIAL_PROMOTE_AHEAD_MAX_SEC = 28.0
 PARTIAL_BUFFER_LOW_WATER_MAX_SEC = 12.0
 PARTIAL_BUFFER_RESUME_AHEAD_MAX_SEC = 36.0
+DENSE_COLOR_FALLBACK_CELLS = 7000
 
 
 def list_midi_input_ports() -> List[Tuple[str, str]]:
@@ -1238,6 +1239,14 @@ def playback(
             visible_pedal_spans: List[NoteSpan] = []
             if pedal_window_index is not None:
                 visible_pedal_spans = _select_spans_in_window(pedal_window_index, t0, t1)
+            dense_color_fallback = False
+            if density_data is not None and not bool(getattr(args, "no_color", False)):
+                try:
+                    dense_color_fallback = len(density_data.get("cells", ())) >= DENSE_COLOR_FALLBACK_CELLS
+                except Exception:
+                    dense_color_fallback = False
+            if dense_color_fallback:
+                status = f"{status}|MONO"
             ready_info = ""
             if pending_packed_task is not None:
                 ready_end = current_ready_timeline_sec()
@@ -1266,7 +1275,7 @@ def playback(
                     kb_black_extra=args.kb_black_extra,
                     move_speed=args.drop_speed,
                     length_speed=args.drop_speed,
-                    use_color=(not args.no_color),
+                    use_color=(not args.no_color) and (not dense_color_fallback),
                     title=run_title,
                     progress=progress,
                     track_colors=track_color_map,
