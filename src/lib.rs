@@ -226,16 +226,11 @@ impl NativePackedPlaybackSource {
                 .then_with(|| channel[a].cmp(&channel[b]))
         });
 
-        let mut by_end: Vec<usize> = (0..spans.len()).collect();
-        by_end.sort_by(|&a, &b| {
-            total_cmp_f64(end_sec[a], end_sec[b])
-                .then_with(|| total_cmp_f64(start_sec[a], start_sec[b]))
-                .then_with(|| note[a].cmp(&note[b]))
-                .then_with(|| channel[a].cmp(&channel[b]))
-        });
-
         let start_values = by_start.iter().map(|&idx| start_sec[idx]).collect();
-        let end_values = by_end.iter().map(|&idx| end_sec[idx]).collect();
+        // Spans are appended while iterating note-off events in sorted event order,
+        // so their end times are already nondecreasing.
+        let by_end: Vec<usize> = (0..spans.len()).collect();
+        let end_values = end_sec.clone();
 
         Self {
             start_sec,
