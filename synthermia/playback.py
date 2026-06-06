@@ -56,7 +56,14 @@ from synthermia.models import (
     NoteSpan,
     _LiveMidiEvent,
 )
-from synthermia.packed import PackedPlaybackSource, load_selected_playback_data, resolve_playback_engine, should_auto_use_packed
+from synthermia.packed import (
+    PackedPlaybackSource,
+    load_selected_playback_data,
+    native_packed_task_available,
+    resolve_playback_engine,
+    should_auto_use_packed,
+    start_background_packed_playback_load,
+)
 from synthermia.render import (
     _safe_stdout_write,
     keyboard_row_counts,
@@ -686,12 +693,27 @@ def playback(
             )
 
         if show_loading_popup and _should_use_loading_popup_for_args(args):
-            loaded = run_background_task_popup(
-                " Loading MIDI ",
-                "Refreshing packed playback data.\nLarge black MIDI files may take a while.",
-                load_playback_data,
-                detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
-            )
+            if native_packed_task_available():
+                native_task = start_background_packed_playback_load(
+                    midi_path,
+                    stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "off")),
+                    midi_flip=bool(getattr(args, "midi_flip", False)),
+                    flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+                )
+                loaded = run_background_task_popup(
+                    " Loading MIDI ",
+                    "Refreshing packed playback data.\nLarge black MIDI files may take a while.",
+                    native_task.result,
+                    detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
+                    progress_fn=native_task.progress,
+                )
+            else:
+                loaded = run_background_task_popup(
+                    " Loading MIDI ",
+                    "Refreshing packed playback data.\nLarge black MIDI files may take a while.",
+                    load_playback_data,
+                    detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
+                )
         else:
             loaded = load_playback_data()
         spans_active = list(loaded.spans or [])

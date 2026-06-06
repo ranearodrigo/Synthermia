@@ -4,6 +4,8 @@ use pyo3::types::PyDict;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::fs;
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 const DEFAULT_TEMPO_US_PER_QN: u32 = 500_000;
@@ -133,6 +135,44 @@ struct NoteDiagnostics {
     remaining_unmatched_note_ons: u64,
 }
 
+struct LoadProgressState {
+    phase: &'static str,
+    tracks_total: usize,
+    tracks_done: usize,
+    events_total: usize,
+    events_processed: usize,
+    notes_ready: usize,
+    controls_ready: usize,
+    measures_ready: usize,
+    done: bool,
+    result: Option<NativePackedPlaybackSource>,
+    error: Option<String>,
+}
+
+impl LoadProgressState {
+    fn new() -> Self {
+        Self {
+            phase: "queued",
+            tracks_total: 0,
+            tracks_done: 0,
+            events_total: 0,
+            events_processed: 0,
+            notes_ready: 0,
+            controls_ready: 0,
+            measures_ready: 0,
+            done: false,
+            result: None,
+            error: None,
+        }
+    }
+}
+
+#[pyclass(module = "synthermia_native")]
+struct NativePackedLoadTask {
+    state: Arc<Mutex<LoadProgressState>>,
+    handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+
 #[pyclass(module = "synthermia_native")]
 struct NativePackedPlaybackSource {
     start_sec: Vec<f64>,
@@ -247,6 +287,14 @@ struct NativeBuildRows {
     measure_times: Vec<f64>,
     note_diag: NoteDiagnostics,
     duration_sec: f64,
+}
+
+#[derive(Clone, Copy)]
+struct BuildProgress {
+    events_processed: usize,
+    note_count: usize,
+    control_count: usize,
+    measure_count: usize,
 }
 
 impl NativePackedPlaybackSource {
@@ -422,6 +470,58 @@ impl NativePackedPlaybackSource {
     }
 }
 
+#[pymethods]
+impl NativePackedLoadTask {
+    fn done(&self) -> bool {
+        self.state.lock().map(|state| state.done).unwrap_or(true)
+    }
+
+    fn progress<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| PyValueError::new_err("Packed load task state poisoned"))?;
+        let out = PyDict::new(py);
+        out.set_item("phase", state.phase)?;
+        out.set_item("tracks_total", state.tracks_total)?;
+        out.set_item("tracks_done", state.tracks_done)?;
+        out.set_item("events_total", state.events_total)?;
+        out.set_item("events_processed", state.events_processed)?;
+        out.set_item("notes_ready", state.notes_ready)?;
+        out.set_item("controls_ready", state.controls_ready)?;
+        out.set_item("measures_ready", state.measures_ready)?;
+        out.set_item("done", state.done)?;
+        if let Some(err) = &state.error {
+            out.set_item("error", err)?;
+        }
+        Ok(out)
+    }
+
+    fn result(&self) -> PyResult<NativePackedPlaybackSource> {
+        if let Some(handle) = self
+            .handle
+            .lock()
+            .map_err(|_| PyValueError::new_err("Packed load task handle poisoned"))?
+            .take()
+        {
+            handle
+                .join()
+                .map_err(|_| PyValueError::new_err("Packed load task thread panicked"))?;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| PyValueError::new_err("Packed load task state poisoned"))?;
+        if let Some(err) = state.error.take() {
+            return Err(PyValueError::new_err(err));
+        }
+        state
+            .result
+            .take()
+            .ok_or_else(|| PyValueError::new_err("Packed load task result is not ready"))
+    }
+}
+
 impl NativePackedPlaybackSource {
     #[allow(clippy::too_many_arguments)]
     fn build_density_data(
@@ -545,6 +645,85 @@ fn native_runtime_info() -> &'static str {
 
 #[pyfunction]
 #[pyo3(signature = (midi_path, stuck_note_fix_mode="off", midi_flip=false, flip_lo=None, flip_hi=None))]
+fn start_packed_playback_load_task_native(
+    midi_path: &str,
+    stuck_note_fix_mode: &str,
+    midi_flip: bool,
+    flip_lo: Option<u8>,
+    flip_hi: Option<u8>,
+) -> NativePackedLoadTask {
+    let state = Arc::new(Mutex::new(LoadProgressState::new()));
+    let handle_state = Arc::clone(&state);
+    let midi_path = midi_path.to_owned();
+    let stuck_note_fix_mode = stuck_note_fix_mode.to_owned();
+    let handle = thread::spawn(move || {
+        let result = (|| -> PyResult<NativePackedPlaybackSource> {
+            let (ticks_per_qn, track_events) = parse_midi_file_with_progress(
+                &midi_path,
+                &handle_state,
+            )?;
+            {
+                let mut progress = handle_state
+                    .lock()
+                    .map_err(|_| PyValueError::new_err("Packed load task state poisoned"))?;
+                progress.phase = "building";
+                progress.events_processed = 0;
+                progress.notes_ready = 0;
+                progress.controls_ready = 0;
+                progress.measures_ready = 0;
+            }
+            let mut rows = build_native_rows_streaming(
+                &track_events,
+                ticks_per_qn,
+                &stuck_note_fix_mode,
+                |snapshot| {
+                    if let Ok(mut progress) = handle_state.lock() {
+                        progress.phase = "building";
+                        progress.events_processed = snapshot.events_processed;
+                        progress.notes_ready = snapshot.note_count;
+                        progress.controls_ready = snapshot.control_count;
+                        progress.measures_ready = snapshot.measure_count;
+                    }
+                },
+            );
+            if midi_flip {
+                apply_midi_flip(&mut rows.note, flip_lo, flip_hi);
+            }
+            {
+                let mut progress = handle_state
+                    .lock()
+                    .map_err(|_| PyValueError::new_err("Packed load task state poisoned"))?;
+                progress.phase = "finalizing";
+                progress.notes_ready = rows.note.len();
+                progress.controls_ready = rows.controls.len();
+                progress.measures_ready = rows.measure_times.len();
+            }
+            Ok(NativePackedPlaybackSource::from_build_rows(rows))
+        })();
+
+        if let Ok(mut progress) = handle_state.lock() {
+            match result {
+                Ok(source) => {
+                    progress.phase = "complete";
+                    progress.done = true;
+                    progress.result = Some(source);
+                }
+                Err(err) => {
+                    progress.phase = "error";
+                    progress.done = true;
+                    progress.error = Some(err.to_string());
+                }
+            }
+        }
+    });
+    NativePackedLoadTask {
+        state,
+        handle: Arc::new(Mutex::new(Some(handle))),
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (midi_path, stuck_note_fix_mode="off", midi_flip=false, flip_lo=None, flip_hi=None))]
 fn load_packed_playback_source_native(
     py: Python<'_>,
     midi_path: &str,
@@ -558,7 +737,7 @@ fn load_packed_playback_source_native(
     py.allow_threads(move || {
         let (ticks_per_qn, track_events) = parse_midi_file(&midi_path)?;
         let mut rows =
-            build_native_rows_streaming(&track_events, ticks_per_qn, &stuck_note_fix_mode);
+            build_native_rows_streaming(&track_events, ticks_per_qn, &stuck_note_fix_mode, |_| {});
         if midi_flip {
             apply_midi_flip(&mut rows.note, flip_lo, flip_hi);
         }
@@ -585,7 +764,7 @@ fn debug_native_profile_load(
 
         let build_started = Instant::now();
         let rows =
-            build_native_rows_streaming(&track_events, ticks_per_qn, &mode);
+            build_native_rows_streaming(&track_events, ticks_per_qn, &mode, |_| {});
         let build_sec = build_started.elapsed().as_secs_f64();
         Ok((parse_sec, build_sec, track_count, event_count, rows))
     })?;
@@ -614,10 +793,29 @@ fn debug_native_profile_load(
 fn parse_midi_file(path: &str) -> PyResult<(u16, Vec<Vec<RawEvent>>)> {
     let data = fs::read(path)
         .map_err(|err| PyValueError::new_err(format!("Failed to read MIDI file: {err}")))?;
-    parse_midi_bytes(&data)
+    parse_midi_bytes_with_progress(&data, |_, _, _| {})
 }
 
-fn parse_midi_bytes(data: &[u8]) -> PyResult<(u16, Vec<Vec<RawEvent>>)> {
+fn parse_midi_file_with_progress(
+    path: &str,
+    progress_state: &Arc<Mutex<LoadProgressState>>,
+) -> PyResult<(u16, Vec<Vec<RawEvent>>)> {
+    let data = fs::read(path)
+        .map_err(|err| PyValueError::new_err(format!("Failed to read MIDI file: {err}")))?;
+    parse_midi_bytes_with_progress(&data, |tracks_total, tracks_done, events_total| {
+        if let Ok(mut progress) = progress_state.lock() {
+            progress.phase = "reading";
+            progress.tracks_total = tracks_total;
+            progress.tracks_done = tracks_done;
+            progress.events_total = events_total;
+        }
+    })
+}
+
+fn parse_midi_bytes_with_progress<F>(data: &[u8], mut progress_cb: F) -> PyResult<(u16, Vec<Vec<RawEvent>>)>
+where
+    F: FnMut(usize, usize, usize),
+{
     let mut i = 0usize;
     ensure_chunk(data, i, b"MThd", "missing MThd header")?;
     i += 4;
@@ -645,6 +843,8 @@ fn parse_midi_bytes(data: &[u8]) -> PyResult<(u16, Vec<Vec<RawEvent>>)> {
     i += hdr_len_usize - 6;
 
     let mut track_events: Vec<Vec<RawEvent>> = Vec::with_capacity(ntrks as usize);
+    let total_tracks = ntrks as usize;
+    let mut total_events = 0usize;
     for track_idx in 0..ntrks {
         ensure_chunk(data, i, b"MTrk", "missing MTrk chunk")?;
         i += 4;
@@ -787,17 +987,23 @@ fn parse_midi_bytes(data: &[u8]) -> PyResult<(u16, Vec<Vec<RawEvent>>)> {
 
         i = trk_end;
         events.sort_by(|a, b| a.tick.cmp(&b.tick).then_with(|| a.order.cmp(&b.order)));
+        total_events += events.len();
         track_events.push(events);
+        progress_cb(total_tracks, track_events.len(), total_events);
     }
 
     Ok((division, track_events))
 }
 
-fn build_native_rows_streaming(
+fn build_native_rows_streaming<F>(
     track_events: &[Vec<RawEvent>],
     ticks_per_qn: u16,
     stuck_note_fix_mode: &str,
-) -> NativeBuildRows {
+    mut progress_cb: F,
+) -> NativeBuildRows
+where
+    F: FnMut(BuildProgress),
+{
     if ticks_per_qn == 0 {
         return NativeBuildRows {
             start_sec: Vec::new(),
@@ -839,10 +1045,13 @@ fn build_native_rows_streaming(
     let mut current_sec = 0.0f64;
     let mut tempo_us_per_qn = DEFAULT_TEMPO_US_PER_QN;
     let mut sec_per_tick = (tempo_us_per_qn as f64) / 1_000_000.0 / (ticks_per_qn as f64);
+    let mut processed_events = 0usize;
+    let mut next_progress_report = 250_000usize;
 
     let mut current_bar_ticks = bar_ticks_for_signature(4, 4, ticks_per_qn);
     let mut next_measure_tick = current_bar_ticks;
     for event in MergedTrackEventIter::new(track_events) {
+        processed_events = processed_events.saturating_add(1);
         max_tick = max_tick.max(event.tick);
 
         while next_measure_tick <= event.tick {
@@ -933,6 +1142,16 @@ fn build_native_rows_streaming(
             }
         }
 
+        if processed_events >= next_progress_report {
+            progress_cb(BuildProgress {
+                events_processed: processed_events,
+                note_count: by_end.len(),
+                control_count: controls.len(),
+                measure_count: measure_times.len(),
+            });
+            next_progress_report = next_progress_report.saturating_add(250_000);
+        }
+
     }
 
     while next_measure_tick <= max_tick {
@@ -991,6 +1210,13 @@ fn build_native_rows_streaming(
     by_end.shrink_to_fit();
     controls.shrink_to_fit();
     measure_times.shrink_to_fit();
+
+    progress_cb(BuildProgress {
+        events_processed: processed_events,
+        note_count: by_end.len(),
+        control_count: controls.len(),
+        measure_count: measure_times.len(),
+    });
 
     NativeBuildRows {
         start_sec,
@@ -1186,8 +1412,10 @@ fn total_cmp_f64(a: f64, b: f64) -> Ordering {
 
 #[pymodule]
 fn synthermia_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<NativePackedLoadTask>()?;
     m.add_class::<NativePackedPlaybackSource>()?;
     m.add_function(wrap_pyfunction!(native_runtime_info, m)?)?;
+    m.add_function(wrap_pyfunction!(start_packed_playback_load_task_native, m)?)?;
     m.add_function(wrap_pyfunction!(load_packed_playback_source_native, m)?)?;
     m.add_function(wrap_pyfunction!(debug_native_profile_load, m)?)?;
     Ok(())

@@ -18,7 +18,13 @@ from synthermia.config import (
     save_last_config,
 )
 from synthermia.midi import normalize_stuck_note_fix_mode
-from synthermia.packed import load_selected_playback_data, resolve_playback_engine, should_auto_use_packed
+from synthermia.packed import (
+    load_selected_playback_data,
+    native_packed_task_available,
+    resolve_playback_engine,
+    should_auto_use_packed,
+    start_background_packed_playback_load,
+)
 from synthermia.playback import list_midi_input_ports, playback, playback_live_midi_input
 from synthermia.soundfont import _normalize_saved_soundfont_library
 from synthermia.tui import run_background_task_popup, run_config_screen
@@ -348,12 +354,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
 
         if _should_use_loading_popup(args, from_config_screen=loaded_from_config_screen):
-            loaded = run_background_task_popup(
-                " Loading MIDI ",
-                "Preparing packed playback data.\nLarge black MIDI files may take a while.",
-                load_playback_data,
-                detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
-            )
+            if native_packed_task_available():
+                native_task = start_background_packed_playback_load(
+                    str(args.midi),
+                    stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
+                    midi_flip=bool(getattr(args, "midi_flip", False)),
+                    flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+                )
+                loaded = run_background_task_popup(
+                    " Loading MIDI ",
+                    "Preparing packed playback data.\nLarge black MIDI files may take a while.",
+                    native_task.result,
+                    detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
+                    progress_fn=native_task.progress,
+                )
+            else:
+                loaded = run_background_task_popup(
+                    " Loading MIDI ",
+                    "Preparing packed playback data.\nLarge black MIDI files may take a while.",
+                    load_playback_data,
+                    detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
+                )
         else:
             loaded = load_playback_data()
         spans = loaded.spans

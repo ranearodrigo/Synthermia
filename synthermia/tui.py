@@ -153,6 +153,7 @@ def run_background_task_popup(
     *,
     detail_prefix: str = "",
     poll_interval: float = 0.12,
+    progress_fn: Optional[Callable[[], Dict[str, Any]]] = None,
 ) -> _TaskResultT:
     state: Dict[str, Any] = {
         "done": False,
@@ -171,12 +172,33 @@ def run_background_task_popup(
     thread = threading.Thread(target=worker, name="synthermia-background-task", daemon=True)
     thread.start()
 
-    def elapsed_detail(started_at: float) -> str:
+    def _format_detail(started_at: float) -> str:
         elapsed = time.perf_counter() - started_at
         prefix = str(detail_prefix or "").strip()
+        detail_parts: List[str] = []
         if prefix:
-            return f"{prefix}  Elapsed: {elapsed:.1f}s"
-        return f"Elapsed: {elapsed:.1f}s"
+            detail_parts.append(prefix)
+        if callable(progress_fn):
+            try:
+                snapshot = dict(progress_fn() or {})
+            except Exception:
+                snapshot = {}
+            phase = str(snapshot.get("phase", "")).strip()
+            if phase:
+                detail_parts.append(f"Phase: {phase}")
+            tracks_done = int(snapshot.get("tracks_done", 0) or 0)
+            tracks_total = int(snapshot.get("tracks_total", 0) or 0)
+            if tracks_total > 0:
+                detail_parts.append(f"Tracks: {tracks_done}/{tracks_total}")
+            events_processed = int(snapshot.get("events_processed", 0) or 0)
+            events_total = int(snapshot.get("events_total", 0) or 0)
+            if events_total > 0:
+                detail_parts.append(f"Events: {events_processed}/{events_total}")
+            notes_ready = int(snapshot.get("notes_ready", 0) or 0)
+            if notes_ready > 0:
+                detail_parts.append(f"Notes: {notes_ready}")
+        detail_parts.append(f"Elapsed: {elapsed:.1f}s")
+        return "  ".join(detail_parts)
 
     def tui(stdscr: "curses._CursesWindow") -> None:
         curses.curs_set(0)
@@ -193,7 +215,7 @@ def run_background_task_popup(
                 title,
                 message,
                 phase=phase,
-                detail=elapsed_detail(started_at),
+                detail=_format_detail(started_at),
             )
             phase += 1
             try:
@@ -205,7 +227,7 @@ def run_background_task_popup(
             title,
             message,
             phase=phase,
-            detail=elapsed_detail(started_at),
+            detail=_format_detail(started_at),
         )
 
     curses.wrapper(tui)

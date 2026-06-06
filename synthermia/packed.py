@@ -1,19 +1,26 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from array import array
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from synthermia.midi import load_playback_source
 from synthermia.models import ControlEvent, NoteSpan
 
 try:
-    from synthermia_native import load_packed_playback_source_native, native_runtime_info
+    from synthermia_native import (
+        load_packed_playback_source_native,
+        native_runtime_info,
+        start_packed_playback_load_task_native,
+    )
 except Exception:
     load_packed_playback_source_native = None
     native_runtime_info = None
+    start_packed_playback_load_task_native = None
 
 
 def resolve_playback_engine(value: str) -> str:
@@ -29,6 +36,10 @@ def resolve_playback_engine(value: str) -> str:
 
 def native_packed_available() -> bool:
     return callable(load_packed_playback_source_native)
+
+
+def native_packed_task_available() -> bool:
+    return callable(start_packed_playback_load_task_native)
 
 
 def should_auto_use_packed(midi_path: str) -> bool:
@@ -49,6 +60,62 @@ class LoadedPlaybackData:
     engine_requested: str
     engine_used: str
     native_backend: bool
+
+
+class BackgroundPlaybackLoadTask:
+    def __init__(self, native_task: object) -> None:
+        self._native_task = native_task
+        self._done = False
+        self._result: Optional[LoadedPlaybackData] = None
+        self._error: Optional[BaseException] = None
+        self._thread = threading.Thread(target=self._collect_result, name="synthermia-native-load-wait", daemon=True)
+        self._thread.start()
+
+    def _collect_result(self) -> None:
+        try:
+            native_source = self._native_task.result()
+            native_controls = _coerce_control_events(native_source.control_tuples())
+            native_measure_times = [float(value) for value in native_source.measure_times()]
+            native_note_diag = {
+                key: int(value) for key, value in dict(native_source.note_diag()).items()
+            }
+            packed_source = PackedPlaybackSource.from_native(
+                native_source=native_source,
+                controls=native_controls,
+                measure_times=native_measure_times,
+                note_diag=native_note_diag,
+            )
+            self._result = LoadedPlaybackData(
+                spans=None,
+                controls=native_controls,
+                measure_times=native_measure_times,
+                note_diag=native_note_diag,
+                packed_source=packed_source,
+                engine_requested="packed",
+                engine_used="packed",
+                native_backend=True,
+            )
+        except BaseException as exc:
+            self._error = exc
+        finally:
+            self._done = True
+
+    def done(self) -> bool:
+        return bool(self._done)
+
+    def progress(self) -> Dict[str, Any]:
+        try:
+            return {str(key): value for key, value in dict(self._native_task.progress()).items()}
+        except Exception:
+            return {"phase": "loading", "done": self.done()}
+
+    def result(self) -> LoadedPlaybackData:
+        self._thread.join()
+        if self._error is not None:
+            raise self._error
+        if self._result is None:
+            raise RuntimeError("Background packed playback task produced no result")
+        return self._result
 
 
 class PackedPlaybackSource:
@@ -246,7 +313,30 @@ def _coerce_note_spans(rows: Sequence[Tuple[int, float, float, int, int, int]]) 
             track=int(track),
         )
         for note, start, end, velocity, channel, track in rows
-    ]
+    ] 
+
+
+def start_background_packed_playback_load(
+    midi_path: str,
+    stuck_note_fix_mode: str = "off",
+    midi_flip: bool = False,
+    flip_bounds: Optional[Tuple[int, int]] = None,
+) -> BackgroundPlaybackLoadTask:
+    if not native_packed_task_available():
+        raise RuntimeError("Native packed background load task is unavailable")
+    flip_lo = None
+    flip_hi = None
+    if flip_bounds is not None:
+        flip_lo = int(flip_bounds[0])
+        flip_hi = int(flip_bounds[1])
+    native_task = start_packed_playback_load_task_native(
+        midi_path,
+        str(stuck_note_fix_mode),
+        bool(midi_flip),
+        flip_lo,
+        flip_hi,
+    )
+    return BackgroundPlaybackLoadTask(native_task)
 
 
 def _coerce_control_events(rows: Sequence[Tuple[float, int, int, int, int]]) -> List[ControlEvent]:
