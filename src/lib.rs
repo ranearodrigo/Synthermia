@@ -196,6 +196,50 @@ impl PartialOrd for MergeCursor {
     }
 }
 
+struct MergedTrackEventIter<'a> {
+    track_events: &'a [Vec<RawEvent>],
+    heap: BinaryHeap<MergeCursor>,
+}
+
+impl<'a> MergedTrackEventIter<'a> {
+    fn new(track_events: &'a [Vec<RawEvent>]) -> Self {
+        let mut heap = BinaryHeap::new();
+        for (track_idx, events) in track_events.iter().enumerate() {
+            if let Some(event) = events.first() {
+                heap.push(MergeCursor {
+                    tick: event.tick,
+                    order: event.order,
+                    track_idx,
+                    event_idx: 0,
+                });
+            }
+        }
+        Self { track_events, heap }
+    }
+}
+
+impl<'a> Iterator for MergedTrackEventIter<'a> {
+    type Item = &'a RawEvent;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let cursor = self.heap.pop()?;
+        let events = &self.track_events[cursor.track_idx];
+        let event = events.get(cursor.event_idx)?;
+
+        let next_idx = cursor.event_idx + 1;
+        if let Some(next) = events.get(next_idx) {
+            self.heap.push(MergeCursor {
+                tick: next.tick,
+                order: next.order,
+                track_idx: cursor.track_idx,
+                event_idx: next_idx,
+            });
+        }
+
+        Some(event)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ActiveNote {
     start_tick: u64,
@@ -531,9 +575,9 @@ fn load_packed_playback_source_native(
     flip_lo: Option<u8>,
     flip_hi: Option<u8>,
 ) -> PyResult<NativePackedPlaybackSource> {
-    let (ticks_per_qn, events) = parse_midi_file(midi_path)?;
+    let (ticks_per_qn, track_events) = parse_midi_file(midi_path)?;
     let (mut spans, controls, measure_times, note_diag) =
-        build_native_rows_streaming(&events, ticks_per_qn, stuck_note_fix_mode);
+        build_native_rows_streaming(&track_events, ticks_per_qn, stuck_note_fix_mode);
     if midi_flip {
         apply_midi_flip(&mut spans, flip_lo, flip_hi);
     }
@@ -545,13 +589,13 @@ fn load_packed_playback_source_native(
     ))
 }
 
-fn parse_midi_file(path: &str) -> PyResult<(u16, Vec<RawEvent>)> {
+fn parse_midi_file(path: &str) -> PyResult<(u16, Vec<Vec<RawEvent>>)> {
     let data = fs::read(path)
         .map_err(|err| PyValueError::new_err(format!("Failed to read MIDI file: {err}")))?;
     parse_midi_bytes(&data)
 }
 
-fn parse_midi_bytes(data: &[u8]) -> PyResult<(u16, Vec<RawEvent>)> {
+fn parse_midi_bytes(data: &[u8]) -> PyResult<(u16, Vec<Vec<RawEvent>>)> {
     let mut i = 0usize;
     ensure_chunk(data, i, b"MThd", "missing MThd header")?;
     i += 4;
@@ -724,45 +768,11 @@ fn parse_midi_bytes(data: &[u8]) -> PyResult<(u16, Vec<RawEvent>)> {
         track_events.push(events);
     }
 
-    Ok((division, merge_track_events(track_events)))
-}
-
-fn merge_track_events(track_events: Vec<Vec<RawEvent>>) -> Vec<RawEvent> {
-    let total_len: usize = track_events.iter().map(Vec::len).sum();
-    let mut merged = Vec::with_capacity(total_len);
-    let mut heap = BinaryHeap::new();
-
-    for (track_idx, events) in track_events.iter().enumerate() {
-        if let Some(event) = events.first() {
-            heap.push(MergeCursor {
-                tick: event.tick,
-                order: event.order,
-                track_idx,
-                event_idx: 0,
-            });
-        }
-    }
-
-    while let Some(cursor) = heap.pop() {
-        let events = &track_events[cursor.track_idx];
-        merged.push(events[cursor.event_idx].clone());
-
-        let next_idx = cursor.event_idx + 1;
-        if let Some(next) = events.get(next_idx) {
-            heap.push(MergeCursor {
-                tick: next.tick,
-                order: next.order,
-                track_idx: cursor.track_idx,
-                event_idx: next_idx,
-            });
-        }
-    }
-
-    merged
+    Ok((division, track_events))
 }
 
 fn build_native_rows_streaming(
-    events: &[RawEvent],
+    track_events: &[Vec<RawEvent>],
     ticks_per_qn: u16,
     stuck_note_fix_mode: &str,
 ) -> (Vec<NativeSpan>, Vec<NativeControl>, Vec<f64>, NoteDiagnostics) {
@@ -796,8 +806,7 @@ fn build_native_rows_streaming(
 
     let mut current_bar_ticks = bar_ticks_for_signature(4, 4, ticks_per_qn);
     let mut next_measure_tick = current_bar_ticks;
-
-    for event in events {
+    for event in MergedTrackEventIter::new(track_events) {
         max_tick = max_tick.max(event.tick);
 
         while next_measure_tick <= event.tick {
