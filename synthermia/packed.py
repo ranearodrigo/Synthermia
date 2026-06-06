@@ -156,14 +156,19 @@ class BackgroundPlaybackLoadTask:
         return self._result
 
     def partial_result(self) -> Optional[LoadedPlaybackData]:
-        if self._partial_result is not None:
-            return self._partial_result
         try:
             native_source = self._native_task.partial_result()
         except Exception:
             return None
         if native_source is None:
             return None
+        native_duration = float(getattr(native_source, "duration_sec", 0.0) or 0.0)
+        if (
+            self._partial_result is not None
+            and self._partial_result.packed_source is not None
+            and native_duration <= (float(self._partial_result.packed_source.duration_sec) + 1e-9)
+        ):
+            return self._partial_result
         native_controls = _coerce_control_events(native_source.control_tuples())
         native_measure_times = [float(value) for value in native_source.measure_times()]
         native_note_diag = {
@@ -192,7 +197,14 @@ class BackgroundPlaybackLoadTask:
         target = max(0.0, float(minimum_ready_sec))
         while True:
             partial = self.partial_result()
-            if partial is not None and (target <= 0.0 or self.seconds_ready() >= target):
+            if partial is not None and (
+                target <= 0.0
+                or (
+                    partial.packed_source is not None
+                    and float(partial.packed_source.duration_sec) >= target
+                )
+                or self.seconds_ready() >= target
+            ):
                 return partial
             if self.done():
                 return self.result()

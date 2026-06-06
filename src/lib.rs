@@ -195,6 +195,8 @@ struct NativePackedPlaybackSource {
     source_kind: String,
 }
 
+const PARTIAL_READY_REFRESH_SEC: f64 = 20.0;
+
 #[derive(Clone, Copy)]
 struct DensityCell {
     x: u16,
@@ -702,7 +704,12 @@ fn start_packed_playback_load_task_native(
                 initial_ready_sec,
                 |source| {
                     if let Ok(mut progress) = handle_state.lock() {
-                        if progress.partial_result.is_none() {
+                        let replace = progress
+                            .partial_result
+                            .as_ref()
+                            .map(|existing| source.duration_sec > (existing.duration_sec + 1e-9))
+                            .unwrap_or(true);
+                        if replace {
                             progress.partial_result = Some(source);
                         }
                     }
@@ -1103,7 +1110,7 @@ where
     let ready_target_sec = initial_ready_sec
         .map(|value| if value.is_finite() { value.max(0.0) } else { 0.0 })
         .filter(|value| *value > 0.0);
-    let mut partial_emitted = false;
+    let mut next_partial_snapshot_sec = ready_target_sec;
 
     let mut current_bar_ticks = bar_ticks_for_signature(4, 4, ticks_per_qn);
     let mut next_measure_tick = current_bar_ticks;
@@ -1202,7 +1209,10 @@ where
         }
 
         if processed_events >= next_progress_report {
-            if !partial_emitted && ready_target_sec.map(|target| current_sec >= target).unwrap_or(false) {
+            while next_partial_snapshot_sec
+                .map(|target| current_sec >= target)
+                .unwrap_or(false)
+            {
                 partial_ready_cb(build_partial_ready_source(
                     &start_sec,
                     &end_sec,
@@ -1219,7 +1229,12 @@ where
                     overlap_fixes,
                     orphan_note_offs,
                 ));
-                partial_emitted = true;
+                next_partial_snapshot_sec = Some(
+                    next_partial_snapshot_sec
+                        .unwrap_or(current_sec)
+                        .max(current_sec)
+                        + PARTIAL_READY_REFRESH_SEC,
+                );
             }
             progress_cb(BuildProgress {
                 events_processed: processed_events,
@@ -1290,7 +1305,10 @@ where
     controls.shrink_to_fit();
     measure_times.shrink_to_fit();
 
-    if !partial_emitted && ready_target_sec.map(|target| duration_sec.max(current_sec) >= target).unwrap_or(false) {
+    while next_partial_snapshot_sec
+        .map(|target| duration_sec.max(current_sec) >= target)
+        .unwrap_or(false)
+    {
         partial_ready_cb(build_partial_ready_source(
             &start_sec,
             &end_sec,
@@ -1307,6 +1325,12 @@ where
             overlap_fixes,
             orphan_note_offs,
         ));
+        next_partial_snapshot_sec = Some(
+            next_partial_snapshot_sec
+                .unwrap_or(duration_sec.max(current_sec))
+                .max(duration_sec.max(current_sec))
+                + PARTIAL_READY_REFRESH_SEC,
+        );
     }
 
     progress_cb(BuildProgress {

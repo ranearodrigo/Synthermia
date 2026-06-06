@@ -86,6 +86,9 @@ from synthermia.soundfont import (
 )
 from synthermia.tui import run_background_task_popup, run_config_screen
 
+PARTIAL_PROMOTE_AHEAD_MARGIN_SEC = 8.0
+PARTIAL_BUFFER_LOW_WATER_SEC = 1.0
+
 
 def list_midi_input_ports() -> List[Tuple[str, str]]:
     exe = shutil.which("aseqdump")
@@ -668,6 +671,23 @@ def playback(
     audio_proc: Optional[subprocess.Popen] = None
     audio_temp_midi: Optional[str] = None
     audio_cache_key: Optional[Tuple[float, float]] = None
+    final_note_diag_reported = pending_packed_task is None
+
+    def maybe_print_final_note_diag(note_diag: Optional[Dict[str, int]]) -> None:
+        nonlocal final_note_diag_reported
+        if final_note_diag_reported:
+            return
+        diag = dict(note_diag or {})
+        overlap_fixes = int(diag.get("overlap_fixes", 0))
+        orphan_offs = int(diag.get("orphan_note_offs", 0))
+        unmatched_ons = int(diag.get("remaining_unmatched_note_ons", 0))
+        if str(getattr(args, "stuck_note_fix", "off")) != "off" and (overlap_fixes > 0 or orphan_offs > 0):
+            print(
+                f"MIDI cleanup: fixed {overlap_fixes} overlap(s), "
+                f"saw {orphan_offs} orphan note-off(s), {unmatched_ons} unmatched note-on(s) remain.",
+                file=sys.stderr,
+            )
+        final_note_diag_reported = True
 
     def rebuild_playback_runtime(resume_t: float, *, show_loading_popup: bool = False) -> None:
         nonlocal spans_active, controls_src, measure_times_src, term_size, max_rows, rows
@@ -975,10 +995,27 @@ def playback(
         audio_temp_midi = None
         audio_cache_key = None
 
-    def promote_pending_packed_source(*, force_wait: bool = False) -> bool:
+    def promote_pending_packed_source(*, force_wait: bool = False, allow_partial_refresh: bool = True) -> bool:
         nonlocal pending_packed_task, controls_src, measure_times_src, packed_source_active, end_time
         if pending_packed_task is None:
             return False
+        if allow_partial_refresh and not pending_packed_task.done():
+            loaded_partial = pending_packed_task.partial_result()
+            if (
+                loaded_partial is not None
+                and loaded_partial.packed_source is not None
+                and (
+                    packed_source_active is None
+                    or float(loaded_partial.packed_source.duration_sec) > (float(packed_source_active.duration_sec) + 1e-9)
+                )
+            ):
+                controls_src = list(loaded_partial.controls or [])
+                if bool(getattr(args, "disable_pedal", False)):
+                    controls_src = [ev for ev in controls_src if int(getattr(ev, "controller", -1)) != 64]
+                measure_times_src = list(loaded_partial.measure_times or [])
+                packed_source_active = loaded_partial.packed_source
+                end_time = float(packed_source_active.duration_sec)
+                return True
         if not pending_packed_task.done():
             if not force_wait:
                 return False
@@ -1000,6 +1037,7 @@ def playback(
         measure_times_src = list(loaded.measure_times or [])
         packed_source_active = loaded.packed_source
         end_time = float(packed_source_active.duration_sec)
+        maybe_print_final_note_diag(loaded.note_diag)
         pending_packed_task = None
         return True
 
@@ -1087,7 +1125,12 @@ def playback(
             if pending_packed_task is not None:
                 if pending_packed_task.done():
                     promote_pending_packed_source()
-                elif (not paused) and play_t >= max(0.0, end_time - 0.5):
+                else:
+                    ready_sec = pending_packed_task.seconds_ready()
+                    current_end = float(end_time)
+                    if ready_sec >= (current_end + PARTIAL_PROMOTE_AHEAD_MARGIN_SEC):
+                        promote_pending_packed_source(allow_partial_refresh=True)
+                if pending_packed_task is not None and (not paused) and play_t >= max(0.0, end_time - PARTIAL_BUFFER_LOW_WATER_SEC):
                     paused = True
                     stop_audio_only()
                     promote_pending_packed_source(force_wait=True)
