@@ -43,6 +43,16 @@ def native_packed_task_available() -> bool:
 
 
 PARTIAL_PACKED_START_BUFFER_SEC = 20.0
+PARTIAL_PACKED_START_BUFFER_REAL_SEC = 1.2
+PARTIAL_PACKED_START_BUFFER_MAX_SEC = 45.0
+
+
+def scaled_partial_start_buffer_sec(playback_speed: float) -> float:
+    speed = max(0.1, float(playback_speed))
+    return max(
+        PARTIAL_PACKED_START_BUFFER_SEC,
+        min(PARTIAL_PACKED_START_BUFFER_MAX_SEC, speed * PARTIAL_PACKED_START_BUFFER_REAL_SEC),
+    )
 
 
 def should_auto_use_packed(midi_path: str) -> bool:

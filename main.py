@@ -19,10 +19,10 @@ from synthermia.config import (
 )
 from synthermia.midi import normalize_stuck_note_fix_mode
 from synthermia.packed import (
-    PARTIAL_PACKED_START_BUFFER_SEC,
     load_selected_playback_data,
     native_packed_task_available,
     resolve_playback_engine,
+    scaled_partial_start_buffer_sec,
     should_auto_use_packed,
     should_use_partial_packed_startup,
     start_background_packed_playback_load,
@@ -357,6 +357,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
 
             pending_packed_task = None
+            partial_start_buffer_sec = scaled_partial_start_buffer_sec(float(getattr(args, "speed", 1.0)))
             use_partial_start = should_use_partial_packed_startup(
                 str(args.midi),
                 playback_engine=str(getattr(args, "playback_engine", "auto")),
@@ -371,20 +372,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
                         midi_flip=bool(getattr(args, "midi_flip", False)),
                         flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
-                        initial_ready_sec=PARTIAL_PACKED_START_BUFFER_SEC,
+                        initial_ready_sec=partial_start_buffer_sec,
                     )
                     if _should_use_loading_popup(args, from_config_screen=loaded_from_config_screen):
                         loaded = run_background_task_popup(
                             " Loading MIDI ",
                             "Preparing the first playable packed buffer.\nPress q or Esc to cancel and return to the config screen.",
-                            lambda: native_task.wait_until_ready(PARTIAL_PACKED_START_BUFFER_SEC),
+                            lambda: native_task.wait_until_ready(partial_start_buffer_sec),
                             detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
                             progress_fn=native_task.progress,
                             allow_cancel=True,
                             cancel_task=native_task.cancel,
                         )
                     else:
-                        loaded = native_task.wait_until_ready(PARTIAL_PACKED_START_BUFFER_SEC)
+                        loaded = native_task.wait_until_ready(partial_start_buffer_sec)
                     if loaded.is_partial and not native_task.done():
                         pending_packed_task = native_task
                 elif _should_use_loading_popup(args, from_config_screen=loaded_from_config_screen):

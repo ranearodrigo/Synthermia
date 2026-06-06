@@ -58,11 +58,11 @@ from synthermia.models import (
 )
 from synthermia.packed import (
     BackgroundPlaybackLoadTask,
-    PARTIAL_PACKED_START_BUFFER_SEC,
     PackedPlaybackSource,
     load_selected_playback_data,
     native_packed_task_available,
     resolve_playback_engine,
+    scaled_partial_start_buffer_sec,
     should_auto_use_packed,
     should_use_partial_packed_startup,
     start_background_packed_playback_load,
@@ -89,6 +89,12 @@ from synthermia.tui import run_background_task_popup, run_config_screen
 PARTIAL_PROMOTE_AHEAD_MARGIN_SEC = 8.0
 PARTIAL_BUFFER_LOW_WATER_SEC = 1.0
 PARTIAL_BUFFER_RESUME_AHEAD_SEC = 6.0
+PARTIAL_PROMOTE_AHEAD_REAL_SEC = 0.75
+PARTIAL_BUFFER_LOW_WATER_REAL_SEC = 0.35
+PARTIAL_BUFFER_RESUME_AHEAD_REAL_SEC = 0.9
+PARTIAL_PROMOTE_AHEAD_MAX_SEC = 28.0
+PARTIAL_BUFFER_LOW_WATER_MAX_SEC = 12.0
+PARTIAL_BUFFER_RESUME_AHEAD_MAX_SEC = 36.0
 
 
 def list_midi_input_ports() -> List[Tuple[str, str]]:
@@ -726,18 +732,19 @@ def playback(
                     soundfont_path=str(getattr(args, "soundfont", "")),
                     pedal_visual_dots=bool(getattr(args, "pedal_visual_dots", False)),
                 )
+                partial_start_buffer_sec = scaled_partial_start_buffer_sec(float(getattr(args, "speed", 1.0)))
                 native_task = start_background_packed_playback_load(
                     midi_path,
                     stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "off")),
                     midi_flip=bool(getattr(args, "midi_flip", False)),
                     flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
-                    initial_ready_sec=PARTIAL_PACKED_START_BUFFER_SEC if use_partial_start else None,
+                    initial_ready_sec=partial_start_buffer_sec if use_partial_start else None,
                 )
                 if use_partial_start:
                     loaded = run_background_task_popup(
                         " Loading MIDI ",
                         "Preparing the first playable packed buffer.\nThe rest of the timeline will keep building in the background.",
-                        lambda: native_task.wait_until_ready(PARTIAL_PACKED_START_BUFFER_SEC),
+                        lambda: native_task.wait_until_ready(partial_start_buffer_sec),
                         detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
                         progress_fn=native_task.progress,
                     )
@@ -1023,6 +1030,31 @@ def playback(
                 pass
         return max(0.0, ready_end)
 
+    def scaled_partial_timeline_sec(base_sec: float, real_sec: float, max_sec: float) -> float:
+        speed = max(0.1, float(getattr(args, "speed", 1.0)))
+        return max(float(base_sec), min(float(max_sec), speed * float(real_sec)))
+
+    def partial_promote_margin_sec() -> float:
+        return scaled_partial_timeline_sec(
+            PARTIAL_PROMOTE_AHEAD_MARGIN_SEC,
+            PARTIAL_PROMOTE_AHEAD_REAL_SEC,
+            PARTIAL_PROMOTE_AHEAD_MAX_SEC,
+        )
+
+    def partial_buffer_low_water_sec() -> float:
+        return scaled_partial_timeline_sec(
+            PARTIAL_BUFFER_LOW_WATER_SEC,
+            PARTIAL_BUFFER_LOW_WATER_REAL_SEC,
+            PARTIAL_BUFFER_LOW_WATER_MAX_SEC,
+        )
+
+    def partial_buffer_resume_ahead_sec() -> float:
+        return scaled_partial_timeline_sec(
+            PARTIAL_BUFFER_RESUME_AHEAD_SEC,
+            PARTIAL_BUFFER_RESUME_AHEAD_REAL_SEC,
+            PARTIAL_BUFFER_RESUME_AHEAD_MAX_SEC,
+        )
+
     def promote_pending_packed_source(
         *,
         force_wait: bool = False,
@@ -1046,9 +1078,10 @@ def playback(
         if not pending_packed_task.done():
             if not force_wait:
                 return False
+            resume_ahead_sec = partial_buffer_resume_ahead_sec()
             wait_target = max(
-                float(wait_target_override) if wait_target_override is not None else float(play_t) + PARTIAL_BUFFER_RESUME_AHEAD_SEC,
-                float(end_time) + PARTIAL_BUFFER_RESUME_AHEAD_SEC,
+                float(wait_target_override) if wait_target_override is not None else float(play_t) + resume_ahead_sec,
+                float(end_time) + resume_ahead_sec,
             )
             loaded = run_background_task_popup(
                 " Buffering MIDI ",
@@ -1128,7 +1161,7 @@ def playback(
                     if pending_packed_task is not None and seek_target > (end_time - 0.25):
                         promote_pending_packed_source(
                             force_wait=True,
-                            wait_target_override=seek_target + PARTIAL_BUFFER_RESUME_AHEAD_SEC,
+                            wait_target_override=seek_target + partial_buffer_resume_ahead_sec(),
                         )
                     play_t = min(current_ready_timeline_sec() + 1.0, seek_target)
                     if not paused:
@@ -1156,9 +1189,9 @@ def playback(
                 else:
                     ready_sec = pending_packed_task.ready_duration_sec()
                     current_end = float(end_time)
-                    if ready_sec >= (current_end + PARTIAL_PROMOTE_AHEAD_MARGIN_SEC):
+                    if ready_sec >= (current_end + partial_promote_margin_sec()):
                         promote_pending_packed_source(allow_partial_refresh=True)
-                if pending_packed_task is not None and (not paused) and play_t >= max(0.0, end_time - PARTIAL_BUFFER_LOW_WATER_SEC):
+                if pending_packed_task is not None and (not paused) and play_t >= max(0.0, end_time - partial_buffer_low_water_sec()):
                     paused = True
                     stop_audio_only()
                     promote_pending_packed_source(force_wait=True)
