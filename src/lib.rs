@@ -21,17 +21,98 @@ enum EventKind {
 #[derive(Clone)]
 struct RawEvent {
     tick: u64,
-    order: u8,
-    kind: EventKind,
-    note: Option<u8>,
-    velocity: Option<u8>,
-    channel: Option<u8>,
     track: u32,
-    controller: Option<u8>,
-    value: Option<u8>,
-    tempo_us_per_qn: Option<u32>,
-    time_sig_numerator: Option<u32>,
-    time_sig_denominator: Option<u32>,
+    kind: EventKind,
+    order: u8,
+    channel: u8,
+    data_a: u32,
+    data_b: u32,
+}
+
+impl RawEvent {
+    fn tempo(tick: u64, track: u32, tempo_us_per_qn: u32) -> Self {
+        Self {
+            tick,
+            track,
+            kind: EventKind::Tempo,
+            order: 0,
+            channel: 0,
+            data_a: tempo_us_per_qn,
+            data_b: 0,
+        }
+    }
+
+    fn time_signature(tick: u64, track: u32, numer: u32, denom: u32) -> Self {
+        Self {
+            tick,
+            track,
+            kind: EventKind::TimeSignature,
+            order: 0,
+            channel: 0,
+            data_a: numer,
+            data_b: denom,
+        }
+    }
+
+    fn control_change(tick: u64, track: u32, channel: u8, controller: u8, value: u8) -> Self {
+        Self {
+            tick,
+            track,
+            kind: EventKind::ControlChange,
+            order: 1,
+            channel,
+            data_a: u32::from(controller),
+            data_b: u32::from(value),
+        }
+    }
+
+    fn note_event(
+        tick: u64,
+        track: u32,
+        order: u8,
+        kind: EventKind,
+        channel: u8,
+        note: u8,
+        velocity: u8,
+    ) -> Self {
+        Self {
+            tick,
+            track,
+            kind,
+            order,
+            channel,
+            data_a: u32::from(note),
+            data_b: u32::from(velocity),
+        }
+    }
+
+    fn note(&self) -> u8 {
+        self.data_a as u8
+    }
+
+    fn velocity(&self) -> u8 {
+        self.data_b as u8
+    }
+
+    fn controller(&self) -> u8 {
+        self.data_a as u8
+    }
+
+    fn value(&self) -> u8 {
+        self.data_b as u8
+    }
+
+    fn tempo_us_per_qn(&self) -> u32 {
+        self.data_a
+    }
+
+    fn time_sig_numerator(&self) -> u32 {
+        self.data_a
+    }
+
+    fn time_sig_denominator(&self) -> u32 {
+        self.data_b
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -555,39 +636,18 @@ fn parse_midi_bytes(data: &[u8]) -> PyResult<(u16, Vec<RawEvent>)> {
                 if meta_type == 0x51 && len == 3 {
                     let tempo =
                         ((payload[0] as u32) << 16) | ((payload[1] as u32) << 8) | payload[2] as u32;
-                    events.push(RawEvent {
-                        tick: abs_tick,
-                        order: 0,
-                        kind: EventKind::Tempo,
-                        note: None,
-                        velocity: None,
-                        channel: None,
-                        track: track_idx as u32,
-                        controller: None,
-                        value: None,
-                        tempo_us_per_qn: Some(tempo),
-                        time_sig_numerator: None,
-                        time_sig_denominator: None,
-                    });
+                    events.push(RawEvent::tempo(abs_tick, track_idx as u32, tempo));
                 } else if meta_type == 0x58 && len >= 2 {
                     let numer = payload[0] as u32;
                     let denom_pow = payload[1] as u32;
                     let denom = 1u32 << denom_pow.min(7);
                     if numer > 0 && denom > 0 {
-                        events.push(RawEvent {
-                            tick: abs_tick,
-                            order: 0,
-                            kind: EventKind::TimeSignature,
-                            note: None,
-                            velocity: None,
-                            channel: None,
-                            track: track_idx as u32,
-                            controller: None,
-                            value: None,
-                            tempo_us_per_qn: None,
-                            time_sig_numerator: Some(numer),
-                            time_sig_denominator: Some(denom),
-                        });
+                        events.push(RawEvent::time_signature(
+                            abs_tick,
+                            track_idx as u32,
+                            numer,
+                            denom,
+                        ));
                     }
                 }
                 continue;
@@ -626,62 +686,40 @@ fn parse_midi_bytes(data: &[u8]) -> PyResult<(u16, Vec<RawEvent>)> {
             i += 2;
 
             match msg_type {
-                0xB0 => events.push(RawEvent {
-                    tick: abs_tick,
-                    order: 1,
-                    kind: EventKind::ControlChange,
-                    note: None,
-                    velocity: None,
-                    channel: Some(channel),
-                    track: track_idx as u32,
-                    controller: Some(p1),
-                    value: Some(p2),
-                    tempo_us_per_qn: None,
-                    time_sig_numerator: None,
-                    time_sig_denominator: None,
-                }),
-                0x90 if p2 == 0 => events.push(RawEvent {
-                    tick: abs_tick,
-                    order: 1,
-                    kind: EventKind::NoteOff,
-                    note: Some(p1),
-                    velocity: Some(p2),
-                    channel: Some(channel),
-                    track: track_idx as u32,
-                    controller: None,
-                    value: None,
-                    tempo_us_per_qn: None,
-                    time_sig_numerator: None,
-                    time_sig_denominator: None,
-                }),
-                0x90 => events.push(RawEvent {
-                    tick: abs_tick,
-                    order: 2,
-                    kind: EventKind::NoteOn,
-                    note: Some(p1),
-                    velocity: Some(p2),
-                    channel: Some(channel),
-                    track: track_idx as u32,
-                    controller: None,
-                    value: None,
-                    tempo_us_per_qn: None,
-                    time_sig_numerator: None,
-                    time_sig_denominator: None,
-                }),
-                0x80 => events.push(RawEvent {
-                    tick: abs_tick,
-                    order: 1,
-                    kind: EventKind::NoteOff,
-                    note: Some(p1),
-                    velocity: Some(p2),
-                    channel: Some(channel),
-                    track: track_idx as u32,
-                    controller: None,
-                    value: None,
-                    tempo_us_per_qn: None,
-                    time_sig_numerator: None,
-                    time_sig_denominator: None,
-                }),
+                0xB0 => events.push(RawEvent::control_change(
+                    abs_tick,
+                    track_idx as u32,
+                    channel,
+                    p1,
+                    p2,
+                )),
+                0x90 if p2 == 0 => events.push(RawEvent::note_event(
+                    abs_tick,
+                    track_idx as u32,
+                    1,
+                    EventKind::NoteOff,
+                    channel,
+                    p1,
+                    p2,
+                )),
+                0x90 => events.push(RawEvent::note_event(
+                    abs_tick,
+                    track_idx as u32,
+                    2,
+                    EventKind::NoteOn,
+                    channel,
+                    p1,
+                    p2,
+                )),
+                0x80 => events.push(RawEvent::note_event(
+                    abs_tick,
+                    track_idx as u32,
+                    1,
+                    EventKind::NoteOff,
+                    channel,
+                    p1,
+                    p2,
+                )),
                 _ => {}
             }
         }
@@ -785,15 +823,12 @@ fn build_native_rows_streaming(
 
         match event.kind {
             EventKind::Tempo => {
-                if let Some(tempo) = event.tempo_us_per_qn {
-                    tempo_us_per_qn = tempo.max(1);
-                    sec_per_tick =
-                        (tempo_us_per_qn as f64) / 1_000_000.0 / (ticks_per_qn as f64);
-                }
+                tempo_us_per_qn = event.tempo_us_per_qn().max(1);
+                sec_per_tick = (tempo_us_per_qn as f64) / 1_000_000.0 / (ticks_per_qn as f64);
             }
             EventKind::TimeSignature => {
-                let numer = event.time_sig_numerator.unwrap_or(4).max(1);
-                let denom = event.time_sig_denominator.unwrap_or(4).max(1);
+                let numer = event.time_sig_numerator().max(1);
+                let denom = event.time_sig_denominator().max(1);
                 if measure_times
                     .last()
                     .map(|last| (last - current_sec).abs() > 1e-12)
@@ -805,60 +840,55 @@ fn build_native_rows_streaming(
                 next_measure_tick = current_tick.saturating_add(current_bar_ticks);
             }
             EventKind::ControlChange => {
-                if let (Some(channel), Some(controller), Some(value)) =
-                    (event.channel, event.controller, event.value)
-                {
-                    controls.push(NativeControl {
-                        time_sec: current_sec,
-                        channel: channel.min(15),
-                        controller,
-                        value,
-                        track: event.track,
-                    });
-                }
+                controls.push(NativeControl {
+                    time_sec: current_sec,
+                    channel: event.channel.min(15),
+                    controller: event.controller(),
+                    value: event.value(),
+                    track: event.track,
+                });
             }
             EventKind::NoteOn => {
-                if let (Some(note), Some(channel), Some(velocity)) =
-                    (event.note, event.channel, event.velocity)
-                {
-                    on_map
-                        .entry((event.track, channel, note))
-                        .or_default()
-                        .push_back(ActiveNote {
-                            start_tick: event.tick,
-                            start_sec: current_sec,
-                            velocity,
-                        });
-                }
+                let note = event.note();
+                let channel = event.channel;
+                let velocity = event.velocity();
+                on_map
+                    .entry((event.track, channel, note))
+                    .or_default()
+                    .push_back(ActiveNote {
+                        start_tick: event.tick,
+                        start_sec: current_sec,
+                        velocity,
+                    });
             }
             EventKind::NoteOff => {
-                if let (Some(note), Some(channel)) = (event.note, event.channel) {
-                    let Some(queue) = on_map.get_mut(&(event.track, channel, note)) else {
-                        orphan_note_offs += 1;
-                        continue;
-                    };
-                    let start = if (mode == "auto" || mode == "lifo") && queue.len() > 1 {
-                        overlap_fixes += 1;
-                        queue.pop_back()
-                    } else {
-                        queue.pop_front()
-                    };
-                    let Some(start_note) = start else {
-                        orphan_note_offs += 1;
-                        continue;
-                    };
-                    if event.tick <= start_note.start_tick {
-                        continue;
-                    }
-                    spans.push(NativeSpan {
-                        note,
-                        start: start_note.start_sec,
-                        end: current_sec,
-                        velocity: start_note.velocity,
-                        channel,
-                        track: event.track,
-                    });
+                let note = event.note();
+                let channel = event.channel;
+                let Some(queue) = on_map.get_mut(&(event.track, channel, note)) else {
+                    orphan_note_offs += 1;
+                    continue;
+                };
+                let start = if (mode == "auto" || mode == "lifo") && queue.len() > 1 {
+                    overlap_fixes += 1;
+                    queue.pop_back()
+                } else {
+                    queue.pop_front()
+                };
+                let Some(start_note) = start else {
+                    orphan_note_offs += 1;
+                    continue;
+                };
+                if event.tick <= start_note.start_tick {
+                    continue;
                 }
+                spans.push(NativeSpan {
+                    note,
+                    start: start_note.start_sec,
+                    end: current_sec,
+                    velocity: start_note.velocity,
+                    channel,
+                    track: event.track,
+                });
             }
         }
 
