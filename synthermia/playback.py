@@ -88,6 +88,7 @@ from synthermia.tui import run_background_task_popup, run_config_screen
 
 PARTIAL_PROMOTE_AHEAD_MARGIN_SEC = 8.0
 PARTIAL_BUFFER_LOW_WATER_SEC = 1.0
+PARTIAL_BUFFER_RESUME_AHEAD_SEC = 6.0
 
 
 def list_midi_input_ports() -> List[Tuple[str, str]]:
@@ -995,6 +996,24 @@ def playback(
         audio_temp_midi = None
         audio_cache_key = None
 
+    def _apply_loaded_packed_source(loaded: object, *, clear_pending: bool = False) -> bool:
+        nonlocal pending_packed_task, controls_src, measure_times_src, packed_source_active, end_time
+        packed_source = getattr(loaded, "packed_source", None)
+        if packed_source is None:
+            if clear_pending:
+                pending_packed_task = None
+            return False
+        controls_src = list(getattr(loaded, "controls", []) or [])
+        if bool(getattr(args, "disable_pedal", False)):
+            controls_src = [ev for ev in controls_src if int(getattr(ev, "controller", -1)) != 64]
+        measure_times_src = list(getattr(loaded, "measure_times", []) or [])
+        packed_source_active = packed_source
+        end_time = float(packed_source_active.duration_sec)
+        if clear_pending:
+            maybe_print_final_note_diag(getattr(loaded, "note_diag", None))
+            pending_packed_task = None
+        return True
+
     def promote_pending_packed_source(*, force_wait: bool = False, allow_partial_refresh: bool = True) -> bool:
         nonlocal pending_packed_task, controls_src, measure_times_src, packed_source_active, end_time
         if pending_packed_task is None:
@@ -1009,37 +1028,26 @@ def playback(
                     or float(loaded_partial.packed_source.duration_sec) > (float(packed_source_active.duration_sec) + 1e-9)
                 )
             ):
-                controls_src = list(loaded_partial.controls or [])
-                if bool(getattr(args, "disable_pedal", False)):
-                    controls_src = [ev for ev in controls_src if int(getattr(ev, "controller", -1)) != 64]
-                measure_times_src = list(loaded_partial.measure_times or [])
-                packed_source_active = loaded_partial.packed_source
-                end_time = float(packed_source_active.duration_sec)
-                return True
+                return _apply_loaded_packed_source(loaded_partial, clear_pending=False)
         if not pending_packed_task.done():
             if not force_wait:
                 return False
+            wait_target = max(
+                float(play_t) + PARTIAL_BUFFER_RESUME_AHEAD_SEC,
+                float(end_time) + PARTIAL_BUFFER_RESUME_AHEAD_SEC,
+            )
             loaded = run_background_task_popup(
                 " Buffering MIDI ",
-                "Preparing the remaining packed playback data.",
-                pending_packed_task.result,
-                detail_prefix="Finishing native build",
+                "Building more packed playback data ahead of the playhead.",
+                lambda: pending_packed_task.wait_until_ready(wait_target),
+                detail_prefix=f"Need: {wait_target:.1f}s ready",
                 progress_fn=pending_packed_task.progress,
             )
+            if getattr(loaded, "is_partial", False):
+                return _apply_loaded_packed_source(loaded, clear_pending=False)
         else:
             loaded = pending_packed_task.result()
-        if loaded.packed_source is None:
-            pending_packed_task = None
-            return False
-        controls_src = list(loaded.controls or [])
-        if bool(getattr(args, "disable_pedal", False)):
-            controls_src = [ev for ev in controls_src if int(getattr(ev, "controller", -1)) != 64]
-        measure_times_src = list(loaded.measure_times or [])
-        packed_source_active = loaded.packed_source
-        end_time = float(packed_source_active.duration_sec)
-        maybe_print_final_note_diag(loaded.note_diag)
-        pending_packed_task = None
-        return True
+        return _apply_loaded_packed_source(loaded, clear_pending=True)
 
 
     _safe_stdout_write("\x1b[2J\x1b[H\x1b[?25l")
