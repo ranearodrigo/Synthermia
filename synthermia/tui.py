@@ -172,6 +172,16 @@ def run_background_task_popup(
     thread = threading.Thread(target=worker, name="synthermia-background-task", daemon=True)
     thread.start()
 
+    def _compact_count(value: int) -> str:
+        amount = max(0, int(value))
+        if amount >= 1_000_000_000:
+            return f"{amount / 1_000_000_000:.2f}B"
+        if amount >= 1_000_000:
+            return f"{amount / 1_000_000:.2f}M"
+        if amount >= 1_000:
+            return f"{amount / 1_000:.1f}k"
+        return str(amount)
+
     def _format_detail(started_at: float) -> str:
         elapsed = time.perf_counter() - started_at
         prefix = str(detail_prefix or "").strip()
@@ -193,13 +203,15 @@ def run_background_task_popup(
             events_processed = int(snapshot.get("events_processed", 0) or 0)
             events_total = int(snapshot.get("events_total", 0) or 0)
             if events_total > 0:
-                detail_parts.append(f"Events: {events_processed}/{events_total}")
+                detail_parts.append(
+                    f"Events: {_compact_count(events_processed)}/{_compact_count(events_total)}"
+                )
             seconds_ready = float(snapshot.get("seconds_ready", 0.0) or 0.0)
             if seconds_ready > 0.0:
                 detail_parts.append(f"Ready: {seconds_ready:.1f}s")
             notes_ready = int(snapshot.get("notes_ready", 0) or 0)
             if notes_ready > 0:
-                detail_parts.append(f"Notes: {notes_ready}")
+                detail_parts.append(f"Notes: {_compact_count(notes_ready)}")
         detail_parts.append(f"Elapsed: {elapsed:.1f}s")
         return "  ".join(detail_parts)
 
