@@ -1014,7 +1014,21 @@ def playback(
             pending_packed_task = None
         return True
 
-    def promote_pending_packed_source(*, force_wait: bool = False, allow_partial_refresh: bool = True) -> bool:
+    def current_ready_timeline_sec() -> float:
+        ready_end = float(end_time)
+        if pending_packed_task is not None:
+            try:
+                ready_end = max(ready_end, float(pending_packed_task.seconds_ready()))
+            except Exception:
+                pass
+        return max(0.0, ready_end)
+
+    def promote_pending_packed_source(
+        *,
+        force_wait: bool = False,
+        allow_partial_refresh: bool = True,
+        wait_target_override: Optional[float] = None,
+    ) -> bool:
         nonlocal pending_packed_task, controls_src, measure_times_src, packed_source_active, end_time
         if pending_packed_task is None:
             return False
@@ -1033,7 +1047,7 @@ def playback(
             if not force_wait:
                 return False
             wait_target = max(
-                float(play_t) + PARTIAL_BUFFER_RESUME_AHEAD_SEC,
+                float(wait_target_override) if wait_target_override is not None else float(play_t) + PARTIAL_BUFFER_RESUME_AHEAD_SEC,
                 float(end_time) + PARTIAL_BUFFER_RESUME_AHEAD_SEC,
             )
             loaded = run_background_task_popup(
@@ -1110,7 +1124,13 @@ def playback(
                     else:
                         set_play_clock(play_t)
                 elif key == "RIGHT":
-                    play_t = min(end_time + 1.0, play_t + 5.0)
+                    seek_target = play_t + 5.0
+                    if pending_packed_task is not None and seek_target > (end_time - 0.25):
+                        promote_pending_packed_source(
+                            force_wait=True,
+                            wait_target_override=seek_target + PARTIAL_BUFFER_RESUME_AHEAD_SEC,
+                        )
+                    play_t = min(current_ready_timeline_sec() + 1.0, seek_target)
                     if not paused:
                         sync_audio_to_time(play_t)
                     else:
@@ -1151,6 +1171,8 @@ def playback(
 
             progress = min(1.0, t / max(0.001, end_time))
             status = "PAUSED" if paused else "PLAY"
+            if pending_packed_task is not None:
+                status = f"{status}|BUILD"
             window_sec = max(0.001, float(play_rows) / max(0.001, float(args.drop_speed)))
             t0 = t - 0.05
             t1 = t + window_sec
@@ -1183,10 +1205,21 @@ def playback(
             visible_pedal_spans: List[NoteSpan] = []
             if pedal_window_index is not None:
                 visible_pedal_spans = _select_spans_in_window(pedal_window_index, t0, t1)
+            ready_info = ""
+            if pending_packed_task is not None:
+                ready_end = current_ready_timeline_sec()
+                ready_margin = max(0.0, ready_end - t)
+                ready_info = f" ready={ready_end:.1f}s (+{ready_margin:.1f}s)"
             if getattr(args, "ascii_ui", False):
-                run_title = f"{title} [{status}] vol={audio_gain:.2f}  (Space pause, e settings, left/right seek, up/down volume, q quit)"
+                run_title = (
+                    f"{title} [{status}] vol={audio_gain:.2f}{ready_info}  "
+                    "(Space pause, e settings, left/right seek, up/down volume, q quit)"
+                )
             else:
-                run_title = f"{title} [{status}] vol={audio_gain:.2f}  (Space pause, e settings, ←/→ seek, ↑/↓ volume, q quit)"
+                run_title = (
+                    f"{title} [{status}] vol={audio_gain:.2f}{ready_info}  "
+                    "(Space pause, e settings, ←/→ seek, ↑/↓ volume, q quit)"
+                )
             if show_piano:
                 frame = render_frame(
                     spans=visible_spans,
