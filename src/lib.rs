@@ -201,7 +201,7 @@ struct NativePackedPlaybackSource {
     source_kind: String,
 }
 
-const PARTIAL_READY_REFRESH_SEC: f64 = 20.0;
+const PARTIAL_READY_REFRESH_SEC: f64 = 12.0;
 
 #[derive(Clone, Copy)]
 struct DensityCell {

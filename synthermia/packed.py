@@ -42,9 +42,9 @@ def native_packed_task_available() -> bool:
     return callable(start_packed_playback_load_task_native)
 
 
-PARTIAL_PACKED_START_BUFFER_SEC = 20.0
-PARTIAL_PACKED_START_BUFFER_REAL_SEC = 1.2
-PARTIAL_PACKED_START_BUFFER_MAX_SEC = 45.0
+PARTIAL_PACKED_START_BUFFER_SEC = 30.0
+PARTIAL_PACKED_START_BUFFER_REAL_SEC = 2.0
+PARTIAL_PACKED_START_BUFFER_MAX_SEC = 70.0
 
 
 def scaled_partial_start_buffer_sec(playback_speed: float) -> float:
