@@ -4,6 +4,7 @@ use pyo3::types::PyDict;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -171,10 +172,15 @@ impl LoadProgressState {
     }
 }
 
+fn cancelled_error() -> PyErr {
+    PyValueError::new_err("Packed load task cancelled")
+}
+
 #[pyclass(module = "synthermia_native")]
 struct NativePackedLoadTask {
     state: Arc<Mutex<LoadProgressState>>,
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    cancel_flag: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -543,6 +549,15 @@ impl NativePackedLoadTask {
             .map_err(|_| PyValueError::new_err("Packed load task state poisoned"))?;
         Ok(state.partial_result.clone())
     }
+
+    fn cancel(&self) {
+        self.cancel_flag.store(true, AtomicOrdering::Relaxed);
+        if let Ok(mut state) = self.state.lock() {
+            if !state.done {
+                state.phase = "cancelled";
+            }
+        }
+    }
 }
 
 impl NativePackedPlaybackSource {
@@ -678,6 +693,8 @@ fn start_packed_playback_load_task_native(
 ) -> NativePackedLoadTask {
     let state = Arc::new(Mutex::new(LoadProgressState::new()));
     let handle_state = Arc::clone(&state);
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let handle_cancel_flag = Arc::clone(&cancel_flag);
     let midi_path = midi_path.to_owned();
     let stuck_note_fix_mode = stuck_note_fix_mode.to_owned();
     let handle = thread::spawn(move || {
@@ -685,23 +702,28 @@ fn start_packed_playback_load_task_native(
             let (ticks_per_qn, track_events) = parse_midi_file_with_progress(
                 &midi_path,
                 &handle_state,
+                &handle_cancel_flag,
             )?;
+            if handle_cancel_flag.load(AtomicOrdering::Relaxed) {
+                return Err(cancelled_error());
+            }
             {
                 let mut progress = handle_state
                     .lock()
                     .map_err(|_| PyValueError::new_err("Packed load task state poisoned"))?;
-            progress.phase = "building";
-            progress.events_processed = 0;
-            progress.seconds_ready = 0.0;
-            progress.notes_ready = 0;
-            progress.controls_ready = 0;
-            progress.measures_ready = 0;
+                progress.phase = "building";
+                progress.events_processed = 0;
+                progress.seconds_ready = 0.0;
+                progress.notes_ready = 0;
+                progress.controls_ready = 0;
+                progress.measures_ready = 0;
             }
             let mut rows = build_native_rows_streaming(
                 &track_events,
                 ticks_per_qn,
                 &stuck_note_fix_mode,
                 initial_ready_sec,
+                || handle_cancel_flag.load(AtomicOrdering::Relaxed),
                 |source| {
                     if let Ok(mut progress) = handle_state.lock() {
                         let replace = progress
@@ -724,7 +746,10 @@ fn start_packed_playback_load_task_native(
                         progress.measures_ready = snapshot.measure_count;
                     }
                 },
-            );
+            )?;
+            if handle_cancel_flag.load(AtomicOrdering::Relaxed) {
+                return Err(cancelled_error());
+            }
             if midi_flip {
                 apply_midi_flip(&mut rows.note, flip_lo, flip_hi);
             }
@@ -749,9 +774,14 @@ fn start_packed_playback_load_task_native(
                     progress.result = Some(source);
                 }
                 Err(err) => {
-                    progress.phase = "error";
+                    let err_text = err.to_string();
+                    progress.phase = if err_text.to_ascii_lowercase().contains("cancel") {
+                        "cancelled"
+                    } else {
+                        "error"
+                    };
                     progress.done = true;
-                    progress.error = Some(err.to_string());
+                    progress.error = Some(err_text);
                 }
             }
         }
@@ -759,6 +789,7 @@ fn start_packed_playback_load_task_native(
     NativePackedLoadTask {
         state,
         handle: Arc::new(Mutex::new(Some(handle))),
+        cancel_flag,
     }
 }
 
@@ -781,9 +812,10 @@ fn load_packed_playback_source_native(
             ticks_per_qn,
             &stuck_note_fix_mode,
             None,
+            || false,
             |_| {},
             |_| {},
-        );
+        )?;
         if midi_flip {
             apply_midi_flip(&mut rows.note, flip_lo, flip_hi);
         }
@@ -814,9 +846,10 @@ fn debug_native_profile_load(
             ticks_per_qn,
             &mode,
             None,
+            || false,
             |_| {},
             |_| {},
-        );
+        )?;
         let build_sec = build_started.elapsed().as_secs_f64();
         Ok((parse_sec, build_sec, track_count, event_count, rows))
     })?;
@@ -845,16 +878,18 @@ fn debug_native_profile_load(
 fn parse_midi_file(path: &str) -> PyResult<(u16, Vec<Vec<RawEvent>>)> {
     let data = fs::read(path)
         .map_err(|err| PyValueError::new_err(format!("Failed to read MIDI file: {err}")))?;
-    parse_midi_bytes_with_progress(&data, |_, _, _| {})
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    parse_midi_bytes_with_progress(&data, &cancel_flag, |_, _, _| {})
 }
 
 fn parse_midi_file_with_progress(
     path: &str,
     progress_state: &Arc<Mutex<LoadProgressState>>,
+    cancel_flag: &Arc<AtomicBool>,
 ) -> PyResult<(u16, Vec<Vec<RawEvent>>)> {
     let data = fs::read(path)
         .map_err(|err| PyValueError::new_err(format!("Failed to read MIDI file: {err}")))?;
-    parse_midi_bytes_with_progress(&data, |tracks_total, tracks_done, events_total| {
+    parse_midi_bytes_with_progress(&data, cancel_flag, |tracks_total, tracks_done, events_total| {
         if let Ok(mut progress) = progress_state.lock() {
             progress.phase = "reading";
             progress.tracks_total = tracks_total;
@@ -865,7 +900,11 @@ fn parse_midi_file_with_progress(
     })
 }
 
-fn parse_midi_bytes_with_progress<F>(data: &[u8], mut progress_cb: F) -> PyResult<(u16, Vec<Vec<RawEvent>>)>
+fn parse_midi_bytes_with_progress<F>(
+    data: &[u8],
+    cancel_flag: &Arc<AtomicBool>,
+    mut progress_cb: F,
+) -> PyResult<(u16, Vec<Vec<RawEvent>>)>
 where
     F: FnMut(usize, usize, usize),
 {
@@ -899,6 +938,9 @@ where
     let total_tracks = ntrks as usize;
     let mut total_events = 0usize;
     for track_idx in 0..ntrks {
+        if cancel_flag.load(AtomicOrdering::Relaxed) {
+            return Err(cancelled_error());
+        }
         ensure_chunk(data, i, b"MTrk", "missing MTrk chunk")?;
         i += 4;
         let (trk_len, i2) = read_u32_be(data, i)?;
@@ -915,6 +957,9 @@ where
         let mut running_status: Option<u8> = None;
 
         while i < trk_end {
+            if cancel_flag.load(AtomicOrdering::Relaxed) && (events.len() % 4096 == 0) {
+                return Err(cancelled_error());
+            }
             let (delta, i2) = read_varlen(data, i)?;
             i = i2;
             abs_tick = abs_tick.saturating_add(delta);
@@ -1053,14 +1098,15 @@ fn build_native_rows_streaming<F>(
     ticks_per_qn: u16,
     stuck_note_fix_mode: &str,
     initial_ready_sec: Option<f64>,
+    should_cancel: impl Fn() -> bool,
     mut partial_ready_cb: impl FnMut(NativePackedPlaybackSource),
     mut progress_cb: F,
-) -> NativeBuildRows
+) -> PyResult<NativeBuildRows>
 where
     F: FnMut(BuildProgress),
 {
     if ticks_per_qn == 0 {
-        return NativeBuildRows {
+        return Ok(NativeBuildRows {
             start_sec: Vec::new(),
             end_sec: Vec::new(),
             note: Vec::new(),
@@ -1077,7 +1123,7 @@ where
                 remaining_unmatched_note_ons: 0,
             },
             duration_sec: 0.0,
-        };
+        });
     }
 
     let mode = normalize_stuck_note_fix_mode(stuck_note_fix_mode);
@@ -1115,6 +1161,9 @@ where
     let mut current_bar_ticks = bar_ticks_for_signature(4, 4, ticks_per_qn);
     let mut next_measure_tick = current_bar_ticks;
     for event in MergedTrackEventIter::new(track_events) {
+        if should_cancel() && (processed_events % 4096 == 0) {
+            return Err(cancelled_error());
+        }
         processed_events = processed_events.saturating_add(1);
         max_tick = max_tick.max(event.tick);
 
@@ -1341,7 +1390,7 @@ where
         measure_count: measure_times.len(),
     });
 
-    NativeBuildRows {
+    Ok(NativeBuildRows {
         start_sec,
         end_sec,
         note,
@@ -1362,7 +1411,7 @@ where
             remaining_unmatched_note_ons,
         },
         duration_sec,
-    }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

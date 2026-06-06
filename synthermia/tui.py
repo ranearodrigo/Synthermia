@@ -74,6 +74,10 @@ from synthermia.soundfont import (
 
 _TaskResultT = TypeVar("_TaskResultT")
 
+
+class BackgroundTaskCancelled(Exception):
+    pass
+
 def _edit_text_popup(stdscr: "curses._CursesWindow", label: str, value: str) -> str:
     h, w = stdscr.getmaxyx()
     # Keep this wide enough for real filesystem paths.
@@ -154,11 +158,14 @@ def run_background_task_popup(
     detail_prefix: str = "",
     poll_interval: float = 0.12,
     progress_fn: Optional[Callable[[], Dict[str, Any]]] = None,
+    allow_cancel: bool = False,
+    cancel_task: Optional[Callable[[], None]] = None,
 ) -> _TaskResultT:
     state: Dict[str, Any] = {
         "done": False,
         "value": None,
         "error": None,
+        "cancel_requested": False,
     }
 
     def worker() -> None:
@@ -188,6 +195,8 @@ def run_background_task_popup(
         detail_parts: List[str] = []
         if prefix:
             detail_parts.append(prefix)
+        if bool(state["cancel_requested"]):
+            detail_parts.append("Cancelling...")
         if callable(progress_fn):
             try:
                 snapshot = dict(progress_fn() or {})
@@ -234,9 +243,21 @@ def run_background_task_popup(
             )
             phase += 1
             try:
-                _ = stdscr.getch()
+                key = stdscr.getch()
             except Exception:
                 time.sleep(poll_interval)
+                continue
+            if (
+                allow_cancel
+                and not bool(state["cancel_requested"])
+                and key in (27, ord("q"), ord("Q"))
+            ):
+                state["cancel_requested"] = True
+                if callable(cancel_task):
+                    try:
+                        cancel_task()
+                    except Exception:
+                        pass
         _draw_progress_popup(
             stdscr,
             title,
@@ -247,6 +268,10 @@ def run_background_task_popup(
 
     curses.wrapper(tui)
     thread.join()
+    if bool(state["cancel_requested"]):
+        if state["error"] is not None and "cancel" not in str(state["error"]).lower():
+            raise state["error"]
+        raise BackgroundTaskCancelled()
     if state["error"] is not None:
         raise state["error"]
     return state["value"]
@@ -628,9 +653,23 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
 
     track_entries: List[MidiTrackSummary] = []
     midi_duration_sec = 0.0
+    track_entries_loaded = False
+    midi_duration_known = False
+    instrument_options_loaded = False
+
+    def invalidate_track_analysis() -> None:
+        nonlocal track_entries, midi_duration_sec, track_entries_loaded, midi_duration_known
+        track_entries = []
+        midi_duration_sec = 0.0
+        track_entries_loaded = False
+        midi_duration_known = False
+
+    def invalidate_instrument_options() -> None:
+        nonlocal instrument_options_loaded
+        instrument_options_loaded = False
 
     def refresh_track_entries() -> None:
-        nonlocal track_entries
+        nonlocal track_entries, track_entries_loaded
         midi_path = str(state.get("midi", "")).strip()
         track_entries = []
         if midi_path and os.path.exists(midi_path) and midi_path.lower().endswith((".mid", ".midi")):
@@ -645,12 +684,15 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         state["track_instruments"] = {k: v for k, v in track_instr.items() if k in valid_keys}
         state["track_colors"] = {k: v for k, v in track_colors.items() if k in valid_keys}
         state["track_volumes"] = {k: v for k, v in track_volumes.items() if k in valid_keys}
+        track_entries_loaded = True
 
     def refresh_midi_duration() -> None:
-        nonlocal midi_duration_sec
+        nonlocal midi_duration_sec, midi_duration_known
         midi_duration_sec = 0.0
+        midi_duration_known = False
         midi_path = str(state.get("midi", "")).strip()
         if not midi_path or not os.path.exists(midi_path) or not midi_path.lower().endswith((".mid", ".midi")):
+            midi_duration_known = True
             return
         try:
             header, events = parse_midi(midi_path)
@@ -663,6 +705,24 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                 midi_duration_sec = max(float(sp.end) for sp in spans_for_bounds)
         except Exception:
             midi_duration_sec = 0.0
+        midi_duration_known = True
+
+    def ensure_track_entries_loaded(stdscr: Optional["curses._CursesWindow"] = None) -> None:
+        if track_entries_loaded:
+            return
+        midi_path = str(state.get("midi", "")).strip()
+        if not midi_path or not os.path.exists(midi_path) or not midi_path.lower().endswith((".mid", ".midi")):
+            refresh_track_entries()
+            return
+        if stdscr is None:
+            refresh_track_entries()
+            return
+        run_background_task_popup(
+            " MIDI Tracks ",
+            "Reading MIDI track summaries for the selected file.",
+            refresh_track_entries,
+            detail_prefix=os.path.basename(midi_path),
+        )
 
     def clamp_playback_fields() -> None:
         speed = max(0.1, float(state.get("speed", 1.0)))
@@ -677,13 +737,14 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         state["pedal_decay_seconds"] = round(pedal_decay, 3)
         state["start"] = round(max(0.0, float(state.get("start", 0.0))), 3)
         state["range"] = normalize_note_range_text(str(state.get("range", "")))
-        if midi_duration_sec > 0:
+        if midi_duration_known and midi_duration_sec > 0:
             state["start"] = round(
                 clamp_playback_start(float(state["start"]), midi_duration_sec, speed, fps),
                 3,
             )
 
     def refresh_instrument_options() -> None:
+        nonlocal instrument_options_loaded
         default_sf = str(state.get("soundfont", "")).strip()
         cur_sf, current_bank, current_prog = parse_instrument_spec(str(state["instrument"]), (0, 0), default_sf)
         current_pair = _clamp_instrument_pair(current_bank, current_prog)
@@ -743,10 +804,28 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             else:
                 track_instr.pop(tk, None)
         state["track_instruments"] = track_instr
+        instrument_options_loaded = True
 
-    refresh_instrument_options()
-    refresh_track_entries()
-    refresh_midi_duration()
+    def ensure_instrument_options_loaded(stdscr: Optional["curses._CursesWindow"] = None) -> None:
+        if instrument_options_loaded:
+            return
+        soundfont_list = _normalize_saved_soundfont_library(
+            state.get("soundfonts", []),
+            primary_soundfont=str(state.get("soundfont", "")),
+        )
+        if not soundfont_list:
+            refresh_instrument_options()
+            return
+        if stdscr is None:
+            refresh_instrument_options()
+            return
+        run_background_task_popup(
+            " SoundFonts ",
+            "Scanning SoundFont presets for instrument selection.",
+            refresh_instrument_options,
+            detail_prefix=f"{len(soundfont_list)} file(s)",
+        )
+
     clamp_playback_fields()
 
     def val_display(field: Dict[str, object]) -> str:
@@ -790,7 +869,11 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             inst_overrides = len(dict(state.get("track_instruments", {})))
             color_overrides = len(dict(state.get("track_colors", {})))
             vol_overrides = len(_normalize_saved_track_volume_map(state.get("track_volumes", {})))
-            total = len(track_entries)
+            if track_entries_loaded:
+                total_txt = str(len(track_entries))
+            else:
+                total_txt = "?"
+            total = total_txt
             return f"{total} tracks  inst:{inst_overrides}  color:{color_overrides}  vol:{vol_overrides}"
         if t == "glyph_editor":
             return (
@@ -2216,10 +2299,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                     # Force fresh hotkeys for the new SoundFont. An empty custom
                     # map makes live mode regenerate defaults from presets.
                     state["midi_input_instrument_map"] = ""
-                refresh_instrument_options()
-                refresh_track_entries()
-            if key == "stuck_note_fix":
-                refresh_midi_duration()
+                    invalidate_instrument_options()
             persist_state()
         elif t == "midi_browser":
             if direction != 0:
@@ -2228,8 +2308,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             if picked is not None:
                 state[key] = picked
                 state["start"] = 0.0
-                refresh_track_entries()
-                refresh_midi_duration()
+                invalidate_track_analysis()
                 persist_state()
         elif t == "soundfont_manager_browser":
             if direction != 0:
@@ -2244,12 +2323,12 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                 state["soundfonts"] = normalized
                 state["soundfont"] = normalized[0] if normalized else ""
                 state["midi_input_instrument_map"] = ""
-                refresh_instrument_options()
-                refresh_track_entries()
+                invalidate_instrument_options()
                 persist_state()
         elif t == "instrument_browser":
             if direction != 0:
                 return None
+            ensure_instrument_options_loaded(stdscr)
             picked = choose_instrument(stdscr, str(state[key]))
             if picked is not None:
                 state[key] = picked
@@ -2264,6 +2343,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         elif t == "live_instrument_map_browser":
             if direction != 0:
                 return None
+            ensure_instrument_options_loaded(stdscr)
             working_map = parse_live_instrument_map(str(state.get(key, "")))
             working_color_map = parse_live_color_map(str(state.get("midi_input_color_map", "")))
             picked = choose_instrument(
@@ -2291,6 +2371,8 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         elif t == "track_customization_browser":
             if direction != 0:
                 return None
+            ensure_track_entries_loaded(stdscr)
+            ensure_instrument_options_loaded(stdscr)
             if choose_track_customization(stdscr):
                 persist_state()
         elif t == "glyph_editor":
@@ -2355,7 +2437,6 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         help_line = "Arrows: navigate  Enter: edit/toggle  PgUp/PgDn: page  q: quit"
         stdscr.addstr(1, 2, help_line[: max(1, w - 4)])
         stdscr.addstr(2, 2, "Enter on section headers collapses/expands that category."[: max(1, w - 4)])
-
         list_top = 4
         list_h = max(1, h - list_top - 1)
         total = len(menu_items)

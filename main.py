@@ -29,7 +29,7 @@ from synthermia.packed import (
 )
 from synthermia.playback import list_midi_input_ports, playback, playback_live_midi_input
 from synthermia.soundfont import _normalize_saved_soundfont_library
-from synthermia.tui import run_background_task_popup, run_config_screen
+from synthermia.tui import BackgroundTaskCancelled, run_background_task_popup, run_config_screen
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Terminal Synthesia-style MIDI visualizer")
@@ -306,163 +306,174 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args.playback_engine = resolve_playback_engine(str(getattr(args, "playback_engine", "auto")))
     no_args_mode = len(raw_argv) == 0
 
-    loaded_from_config_screen = False
-
     try:
-        if no_args_mode:
-            args = run_config_screen(args)
-            loaded_from_config_screen = True
-        if args.drop_speed <= 0:
-            raise ValueError("--drop-speed must be > 0")
-        if args.x_scale <= 0:
-            raise ValueError("--x-scale must be > 0")
-        if args.kb_y_scale <= 0:
-            raise ValueError("--kb-y-scale must be > 0")
-        if args.kb_black_extra < 0:
-            raise ValueError("--kb-black-extra must be >= 0")
-        if float(getattr(args, "dynamics_full_velocity", 96.0)) <= 0:
-            raise ValueError("--dynamics-full-velocity must be > 0")
-        args.pedal_opacity_scale = max(0.0, min(1.0, float(getattr(args, "pedal_opacity_scale", 0.5))))
-        args.pedal_decay_seconds = max(0.0, float(getattr(args, "pedal_decay_seconds", 10.0)))
-        bg_txt = str(getattr(args, "terminal_bg_color", "")).strip()
-        if bg_txt and not re.match(r"^\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*$", bg_txt):
-            raise ValueError("--terminal-bg-color must be R,G,B")
-        args.terminal_bg_color = bg_txt
-        normalized_glyphs = resolve_visual_glyphs(args)
-        for glyph_key, glyph_val in normalized_glyphs.items():
-            setattr(args, glyph_key, glyph_val)
-        if args.speed <= 0:
-            raise ValueError("--speed must be > 0")
-        if args.soundfont and (bool(getattr(args, "midi_input_mode", False)) or str(args.audio_engine).lower() == "python"):
-            _load_pyfluidsynth_module()
-        selected_midi_for_config = args.midi
-        if bool(getattr(args, "midi_input_mode", False)):
-            save_last_config(args_to_saved_config(args, selected_midi_for_config))
-            playback_live_midi_input(args)
-            return 0
-        if not args.midi:
-            print("Provide a MIDI path.", file=sys.stderr)
-            return 2
-        if not os.path.exists(args.midi):
-            print(f"MIDI file not found: {args.midi}", file=sys.stderr)
-            return 2
-        def load_playback_data():
-            return load_selected_playback_data(
-                str(args.midi),
-                stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
-                midi_flip=bool(getattr(args, "midi_flip", False)),
-                flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
-                playback_engine=str(getattr(args, "playback_engine", "auto")),
-            )
+        while True:
+            loaded_from_config_screen = False
+            if no_args_mode:
+                args = run_config_screen(args)
+                loaded_from_config_screen = True
+            if args.drop_speed <= 0:
+                raise ValueError("--drop-speed must be > 0")
+            if args.x_scale <= 0:
+                raise ValueError("--x-scale must be > 0")
+            if args.kb_y_scale <= 0:
+                raise ValueError("--kb-y-scale must be > 0")
+            if args.kb_black_extra < 0:
+                raise ValueError("--kb-black-extra must be >= 0")
+            if float(getattr(args, "dynamics_full_velocity", 96.0)) <= 0:
+                raise ValueError("--dynamics-full-velocity must be > 0")
+            args.pedal_opacity_scale = max(0.0, min(1.0, float(getattr(args, "pedal_opacity_scale", 0.5))))
+            args.pedal_decay_seconds = max(0.0, float(getattr(args, "pedal_decay_seconds", 10.0)))
+            bg_txt = str(getattr(args, "terminal_bg_color", "")).strip()
+            if bg_txt and not re.match(r"^\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*$", bg_txt):
+                raise ValueError("--terminal-bg-color must be R,G,B")
+            args.terminal_bg_color = bg_txt
+            normalized_glyphs = resolve_visual_glyphs(args)
+            for glyph_key, glyph_val in normalized_glyphs.items():
+                setattr(args, glyph_key, glyph_val)
+            if args.speed <= 0:
+                raise ValueError("--speed must be > 0")
+            if args.soundfont and (bool(getattr(args, "midi_input_mode", False)) or str(args.audio_engine).lower() == "python"):
+                _load_pyfluidsynth_module()
+            selected_midi_for_config = args.midi
+            if bool(getattr(args, "midi_input_mode", False)):
+                save_last_config(args_to_saved_config(args, selected_midi_for_config))
+                playback_live_midi_input(args)
+                return 0
+            if not args.midi:
+                print("Provide a MIDI path.", file=sys.stderr)
+                return 2
+            if not os.path.exists(args.midi):
+                print(f"MIDI file not found: {args.midi}", file=sys.stderr)
+                return 2
 
-        pending_packed_task = None
-        use_partial_start = should_use_partial_packed_startup(
-            str(args.midi),
-            playback_engine=str(getattr(args, "playback_engine", "auto")),
-            start_sec=float(getattr(args, "start", 0.0)),
-            soundfont_path=str(getattr(args, "soundfont", "")),
-            pedal_visual_dots=bool(getattr(args, "pedal_visual_dots", False)),
-        )
-        if use_partial_start and native_packed_task_available():
-            native_task = start_background_packed_playback_load(
-                str(args.midi),
-                stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
-                midi_flip=bool(getattr(args, "midi_flip", False)),
-                flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
-                initial_ready_sec=PARTIAL_PACKED_START_BUFFER_SEC,
-            )
-            if _should_use_loading_popup(args, from_config_screen=loaded_from_config_screen):
-                loaded = run_background_task_popup(
-                    " Loading MIDI ",
-                    "Preparing the first playable packed buffer.\nThe rest of the timeline will keep building in the background.",
-                    lambda: native_task.wait_until_ready(PARTIAL_PACKED_START_BUFFER_SEC),
-                    detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
-                    progress_fn=native_task.progress,
-                )
-            else:
-                loaded = native_task.wait_until_ready(PARTIAL_PACKED_START_BUFFER_SEC)
-            if loaded.is_partial and not native_task.done():
-                pending_packed_task = native_task
-        elif _should_use_loading_popup(args, from_config_screen=loaded_from_config_screen):
-            if native_packed_task_available():
-                native_task = start_background_packed_playback_load(
+            def load_playback_data():
+                return load_selected_playback_data(
                     str(args.midi),
                     stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
                     midi_flip=bool(getattr(args, "midi_flip", False)),
                     flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+                    playback_engine=str(getattr(args, "playback_engine", "auto")),
                 )
-                loaded = run_background_task_popup(
-                    " Loading MIDI ",
-                    "Preparing packed playback data.\nLarge black MIDI files may take a while.",
-                    native_task.result,
-                    detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
-                    progress_fn=native_task.progress,
-                )
-            else:
-                loaded = run_background_task_popup(
-                    " Loading MIDI ",
-                    "Preparing packed playback data.\nLarge black MIDI files may take a while.",
-                    load_playback_data,
-                    detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
-                )
-        else:
-            loaded = load_playback_data()
-        spans = loaded.spans
-        controls = loaded.controls
-        measure_times = loaded.measure_times
-        note_diag = loaded.note_diag
-        overlap_fixes = int(note_diag.get("overlap_fixes", 0))
-        orphan_offs = int(note_diag.get("orphan_note_offs", 0))
-        unmatched_ons = int(note_diag.get("remaining_unmatched_note_ons", 0))
-        if (
-            (not loaded.is_partial)
-            and str(getattr(args, "stuck_note_fix", "off")) != "off"
-            and (overlap_fixes > 0 or orphan_offs > 0)
-        ):
-            print(
-                f"MIDI cleanup: fixed {overlap_fixes} overlap(s), "
-                f"saw {orphan_offs} orphan note-off(s), {unmatched_ons} unmatched note-on(s) remain.",
-                file=sys.stderr,
-            )
 
-        args.range = normalize_note_range_text(str(getattr(args, "range", "")))
-        args.start = max(0.0, float(getattr(args, "start", 0.0)))
-        duration_sec = 0.0
-        if spans:
-            duration_sec = max(float(sp.end) for sp in spans)
-        elif loaded.packed_source is not None:
-            duration_sec = float(loaded.packed_source.duration_sec)
-        if duration_sec > 0.0:
-            clamped_start = clamp_playback_start(
-                float(args.start),
-                duration_sec,
-                float(args.speed),
-                int(getattr(args, "fps", 30)),
+            pending_packed_task = None
+            use_partial_start = should_use_partial_packed_startup(
+                str(args.midi),
+                playback_engine=str(getattr(args, "playback_engine", "auto")),
+                start_sec=float(getattr(args, "start", 0.0)),
+                soundfont_path=str(getattr(args, "soundfont", "")),
+                pedal_visual_dots=bool(getattr(args, "pedal_visual_dots", False)),
             )
-            if clamped_start < float(args.start) - 1e-9:
+            try:
+                if use_partial_start and native_packed_task_available():
+                    native_task = start_background_packed_playback_load(
+                        str(args.midi),
+                        stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
+                        midi_flip=bool(getattr(args, "midi_flip", False)),
+                        flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+                        initial_ready_sec=PARTIAL_PACKED_START_BUFFER_SEC,
+                    )
+                    if _should_use_loading_popup(args, from_config_screen=loaded_from_config_screen):
+                        loaded = run_background_task_popup(
+                            " Loading MIDI ",
+                            "Preparing the first playable packed buffer.\nPress q or Esc to cancel and return to the config screen.",
+                            lambda: native_task.wait_until_ready(PARTIAL_PACKED_START_BUFFER_SEC),
+                            detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
+                            progress_fn=native_task.progress,
+                            allow_cancel=True,
+                            cancel_task=native_task.cancel,
+                        )
+                    else:
+                        loaded = native_task.wait_until_ready(PARTIAL_PACKED_START_BUFFER_SEC)
+                    if loaded.is_partial and not native_task.done():
+                        pending_packed_task = native_task
+                elif _should_use_loading_popup(args, from_config_screen=loaded_from_config_screen):
+                    if native_packed_task_available():
+                        native_task = start_background_packed_playback_load(
+                            str(args.midi),
+                            stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
+                            midi_flip=bool(getattr(args, "midi_flip", False)),
+                            flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+                        )
+                        loaded = run_background_task_popup(
+                            " Loading MIDI ",
+                            "Preparing packed playback data.\nPress q or Esc to cancel and return to the config screen.",
+                            native_task.result,
+                            detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
+                            progress_fn=native_task.progress,
+                            allow_cancel=True,
+                            cancel_task=native_task.cancel,
+                        )
+                    else:
+                        loaded = run_background_task_popup(
+                            " Loading MIDI ",
+                            "Preparing packed playback data.\nLarge black MIDI files may take a while.",
+                            load_playback_data,
+                            detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
+                        )
+                else:
+                    loaded = load_playback_data()
+            except BackgroundTaskCancelled:
+                if no_args_mode:
+                    continue
+                raise KeyboardInterrupt()
+
+            spans = loaded.spans
+            controls = loaded.controls
+            measure_times = loaded.measure_times
+            note_diag = loaded.note_diag
+            overlap_fixes = int(note_diag.get("overlap_fixes", 0))
+            orphan_offs = int(note_diag.get("orphan_note_offs", 0))
+            unmatched_ons = int(note_diag.get("remaining_unmatched_note_ons", 0))
+            if (
+                (not loaded.is_partial)
+                and str(getattr(args, "stuck_note_fix", "off")) != "off"
+                and (overlap_fixes > 0 or orphan_offs > 0)
+            ):
                 print(
-                    f"Start time clamped from {float(args.start):.3f}s to {clamped_start:.3f}s "
-                    f"(MIDI duration {duration_sec:.3f}s at speed {float(args.speed):.2f}x).",
+                    f"MIDI cleanup: fixed {overlap_fixes} overlap(s), "
+                    f"saw {orphan_offs} orphan note-off(s), {unmatched_ons} unmatched note-on(s) remain.",
                     file=sys.stderr,
                 )
-                args.start = clamped_start
 
-        if loaded.engine_requested == "packed" and loaded.packed_source is not None and not loaded.native_backend:
-            print(
-                "Packed playback requested but the native extension is unavailable; using the Python packed fallback.",
-                file=sys.stderr,
+            args.range = normalize_note_range_text(str(getattr(args, "range", "")))
+            args.start = max(0.0, float(getattr(args, "start", 0.0)))
+            duration_sec = 0.0
+            if spans:
+                duration_sec = max(float(sp.end) for sp in spans)
+            elif loaded.packed_source is not None:
+                duration_sec = float(loaded.packed_source.duration_sec)
+            if duration_sec > 0.0:
+                clamped_start = clamp_playback_start(
+                    float(args.start),
+                    duration_sec,
+                    float(args.speed),
+                    int(getattr(args, "fps", 30)),
+                )
+                if clamped_start < float(args.start) - 1e-9:
+                    print(
+                        f"Start time clamped from {float(args.start):.3f}s to {clamped_start:.3f}s "
+                        f"(MIDI duration {duration_sec:.3f}s at speed {float(args.speed):.2f}x).",
+                        file=sys.stderr,
+                    )
+                    args.start = clamped_start
+
+            if loaded.engine_requested == "packed" and loaded.packed_source is not None and not loaded.native_backend:
+                print(
+                    "Packed playback requested but the native extension is unavailable; using the Python packed fallback.",
+                    file=sys.stderr,
+                )
+
+            save_last_config(args_to_saved_config(args, selected_midi_for_config))
+            playback(
+                spans,
+                args,
+                controls=controls,
+                measure_times=measure_times,
+                packed_source=loaded.packed_source,
+                pending_packed_task=pending_packed_task,
             )
-
-        save_last_config(args_to_saved_config(args, selected_midi_for_config))
-        playback(
-            spans,
-            args,
-            controls=controls,
-            measure_times=measure_times,
-            packed_source=loaded.packed_source,
-            pending_packed_task=pending_packed_task,
-        )
-        return 0
+            return 0
     except KeyboardInterrupt:
         return 130
     except Exception as exc:

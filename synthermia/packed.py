@@ -134,6 +134,14 @@ class BackgroundPlaybackLoadTask:
     def done(self) -> bool:
         return bool(self._done)
 
+    def cancel(self) -> None:
+        try:
+            cancel = getattr(self._native_task, "cancel")
+        except Exception:
+            cancel = None
+        if callable(cancel):
+            cancel()
+
     def progress(self) -> Dict[str, Any]:
         try:
             return {str(key): value for key, value in dict(self._native_task.progress()).items()}
