@@ -7,9 +7,10 @@ import random
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, TypeVar
 
 from synthermia.audio import (
     RealtimeFluidSynthPlayer,
@@ -70,6 +71,8 @@ from synthermia.soundfont import (
     parse_instrument_spec,
     scan_soundfont_presets,
 )
+
+_TaskResultT = TypeVar("_TaskResultT")
 
 def _edit_text_popup(stdscr: "curses._CursesWindow", label: str, value: str) -> str:
     h, w = stdscr.getmaxyx()
@@ -141,6 +144,75 @@ def _draw_progress_popup(
     bar = (bar + (" " * bar_w))[:bar_w] + "]"
     win.addstr(box_h - 2, 2, f"{bar} Working..."[: max(1, box_w - 4)], curses.A_DIM)
     win.refresh()
+
+
+def run_background_task_popup(
+    title: str,
+    message: str,
+    task: Callable[[], _TaskResultT],
+    *,
+    detail_prefix: str = "",
+    poll_interval: float = 0.12,
+) -> _TaskResultT:
+    state: Dict[str, Any] = {
+        "done": False,
+        "value": None,
+        "error": None,
+    }
+
+    def worker() -> None:
+        try:
+            state["value"] = task()
+        except BaseException as exc:
+            state["error"] = exc
+        finally:
+            state["done"] = True
+
+    thread = threading.Thread(target=worker, name="synthermia-background-task", daemon=True)
+    thread.start()
+
+    def elapsed_detail(started_at: float) -> str:
+        elapsed = time.perf_counter() - started_at
+        prefix = str(detail_prefix or "").strip()
+        if prefix:
+            return f"{prefix}  Elapsed: {elapsed:.1f}s"
+        return f"Elapsed: {elapsed:.1f}s"
+
+    def tui(stdscr: "curses._CursesWindow") -> None:
+        curses.curs_set(0)
+        try:
+            stdscr.nodelay(True)
+            stdscr.timeout(max(10, int(max(0.02, poll_interval) * 1000)))
+        except Exception:
+            pass
+        phase = 0
+        started_at = time.perf_counter()
+        while not bool(state["done"]):
+            _draw_progress_popup(
+                stdscr,
+                title,
+                message,
+                phase=phase,
+                detail=elapsed_detail(started_at),
+            )
+            phase += 1
+            try:
+                _ = stdscr.getch()
+            except Exception:
+                time.sleep(poll_interval)
+        _draw_progress_popup(
+            stdscr,
+            title,
+            message,
+            phase=phase,
+            detail=elapsed_detail(started_at),
+        )
+
+    curses.wrapper(tui)
+    thread.join()
+    if state["error"] is not None:
+        raise state["error"]
+    return state["value"]
 
 
 def _message_popup(stdscr: "curses._CursesWindow", title: str, message: str) -> None:

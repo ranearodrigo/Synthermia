@@ -546,36 +546,49 @@ fn native_runtime_info() -> &'static str {
 #[pyfunction]
 #[pyo3(signature = (midi_path, stuck_note_fix_mode="off", midi_flip=false, flip_lo=None, flip_hi=None))]
 fn load_packed_playback_source_native(
+    py: Python<'_>,
     midi_path: &str,
     stuck_note_fix_mode: &str,
     midi_flip: bool,
     flip_lo: Option<u8>,
     flip_hi: Option<u8>,
 ) -> PyResult<NativePackedPlaybackSource> {
-    let (ticks_per_qn, track_events) = parse_midi_file(midi_path)?;
-    let mut rows =
-        build_native_rows_streaming(&track_events, ticks_per_qn, stuck_note_fix_mode);
-    if midi_flip {
-        apply_midi_flip(&mut rows.note, flip_lo, flip_hi);
-    }
-    Ok(NativePackedPlaybackSource::from_build_rows(rows))
+    let midi_path = midi_path.to_owned();
+    let stuck_note_fix_mode = stuck_note_fix_mode.to_owned();
+    py.allow_threads(move || {
+        let (ticks_per_qn, track_events) = parse_midi_file(&midi_path)?;
+        let mut rows =
+            build_native_rows_streaming(&track_events, ticks_per_qn, &stuck_note_fix_mode);
+        if midi_flip {
+            apply_midi_flip(&mut rows.note, flip_lo, flip_hi);
+        }
+        Ok(NativePackedPlaybackSource::from_build_rows(rows))
+    })
 }
 
 #[pyfunction]
 #[pyo3(signature = (midi_path, stuck_note_fix_mode=None))]
-fn debug_native_profile_load(midi_path: &str, stuck_note_fix_mode: Option<&str>) -> PyResult<Py<PyDict>> {
-    let mode = stuck_note_fix_mode.unwrap_or("off");
-    let parse_started = Instant::now();
-    let (ticks_per_qn, track_events) = parse_midi_file(midi_path)?;
-    let parse_sec = parse_started.elapsed().as_secs_f64();
+fn debug_native_profile_load(
+    py: Python<'_>,
+    midi_path: &str,
+    stuck_note_fix_mode: Option<&str>,
+) -> PyResult<Py<PyDict>> {
+    let midi_path = midi_path.to_owned();
+    let mode = stuck_note_fix_mode.unwrap_or("off").to_owned();
+    let (parse_sec, build_sec, track_count, event_count, rows) = py.allow_threads(move || -> PyResult<_> {
+        let parse_started = Instant::now();
+        let (ticks_per_qn, track_events) = parse_midi_file(&midi_path)?;
+        let parse_sec = parse_started.elapsed().as_secs_f64();
 
-    let track_count = track_events.len();
-    let event_count: usize = track_events.iter().map(Vec::len).sum();
+        let track_count = track_events.len();
+        let event_count: usize = track_events.iter().map(Vec::len).sum();
 
-    let build_started = Instant::now();
-    let rows =
-        build_native_rows_streaming(&track_events, ticks_per_qn, mode);
-    let build_sec = build_started.elapsed().as_secs_f64();
+        let build_started = Instant::now();
+        let rows =
+            build_native_rows_streaming(&track_events, ticks_per_qn, &mode);
+        let build_sec = build_started.elapsed().as_secs_f64();
+        Ok((parse_sec, build_sec, track_count, event_count, rows))
+    })?;
 
     Python::with_gil(|py| {
         let out = PyDict::new(py);

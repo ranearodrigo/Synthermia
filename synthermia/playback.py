@@ -56,7 +56,7 @@ from synthermia.models import (
     NoteSpan,
     _LiveMidiEvent,
 )
-from synthermia.packed import PackedPlaybackSource, load_selected_playback_data
+from synthermia.packed import PackedPlaybackSource, load_selected_playback_data, resolve_playback_engine, should_auto_use_packed
 from synthermia.render import (
     _safe_stdout_write,
     keyboard_row_counts,
@@ -74,7 +74,7 @@ from synthermia.soundfont import (
     parse_instrument_pair,
     scan_soundfont_presets,
 )
-from synthermia.tui import run_config_screen
+from synthermia.tui import run_background_task_popup, run_config_screen
 
 
 def list_midi_input_ports() -> List[Tuple[str, str]]:
@@ -96,6 +96,14 @@ def list_midi_input_ports() -> List[Tuple[str, str]]:
         label = f"{port_id}  {client_name} / {port_name}"
         ports.append((port_id, label))
     return ports
+
+
+def _should_use_loading_popup_for_args(args: argparse.Namespace) -> bool:
+    midi_path = str(getattr(args, "midi", "")).strip()
+    if not midi_path:
+        return False
+    engine = resolve_playback_engine(str(getattr(args, "playback_engine", "auto")))
+    return engine == "packed" or (engine == "auto" and should_auto_use_packed(midi_path))
 
 def resolve_midi_input_port(requested_port: str) -> Tuple[str, str]:
     requested = str(requested_port or "").strip()
@@ -650,7 +658,7 @@ def playback(
     audio_temp_midi: Optional[str] = None
     audio_cache_key: Optional[Tuple[float, float]] = None
 
-    def rebuild_playback_runtime(resume_t: float) -> None:
+    def rebuild_playback_runtime(resume_t: float, *, show_loading_popup: bool = False) -> None:
         nonlocal spans_active, controls_src, measure_times_src, term_size, max_rows, rows
         nonlocal _b_rows, _w_rows, kb_rows, min_rows, play_rows
         nonlocal lo_hi, note_lo, note_hi, term_w, max_frame_cols, effective_x_scale, frame_cols
@@ -668,13 +676,24 @@ def playback(
 
         release_audio_runtime()
 
-        loaded = load_selected_playback_data(
-            midi_path,
-            stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "off")),
-            midi_flip=bool(getattr(args, "midi_flip", False)),
-            flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
-            playback_engine=str(getattr(args, "playback_engine", "auto")),
-        )
+        def load_playback_data():
+            return load_selected_playback_data(
+                midi_path,
+                stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "off")),
+                midi_flip=bool(getattr(args, "midi_flip", False)),
+                flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+                playback_engine=str(getattr(args, "playback_engine", "auto")),
+            )
+
+        if show_loading_popup and _should_use_loading_popup_for_args(args):
+            loaded = run_background_task_popup(
+                " Loading MIDI ",
+                "Refreshing packed playback data.\nLarge black MIDI files may take a while.",
+                load_playback_data,
+                detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
+            )
+        else:
+            loaded = load_playback_data()
         spans_active = list(loaded.spans or [])
         controls_src = loaded.controls
         measure_times_src = loaded.measure_times
@@ -955,11 +974,14 @@ def playback(
                     args.start = resume_hint
                     save_last_config(args_to_saved_config(args, str(getattr(args, "midi", ""))))
                     args = run_config_screen(args)
+                    release_audio_runtime()
+                    rebuild_playback_runtime(
+                        float(getattr(args, "start", resume_hint)),
+                        show_loading_popup=True,
+                    )
                     tty.setcbreak(stdin_fd)
                     fcntl.fcntl(stdin_fd, fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
                     keybuf = ""
-                    release_audio_runtime()
-                    rebuild_playback_runtime(float(getattr(args, "start", resume_hint)))
                 elif key == "LEFT":
                     play_t = max(0.0, play_t - 5.0)
                     if not paused:

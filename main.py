@@ -18,10 +18,10 @@ from synthermia.config import (
     save_last_config,
 )
 from synthermia.midi import normalize_stuck_note_fix_mode
-from synthermia.packed import load_selected_playback_data, resolve_playback_engine
+from synthermia.packed import load_selected_playback_data, resolve_playback_engine, should_auto_use_packed
 from synthermia.playback import list_midi_input_ports, playback, playback_live_midi_input
 from synthermia.soundfont import _normalize_saved_soundfont_library
-from synthermia.tui import run_config_screen
+from synthermia.tui import run_background_task_popup, run_config_screen
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Terminal Synthesia-style MIDI visualizer")
@@ -262,6 +262,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _should_use_loading_popup(args: argparse.Namespace, *, from_config_screen: bool) -> bool:
+    if not from_config_screen:
+        return False
+    midi_path = str(getattr(args, "midi", "")).strip()
+    if not midi_path:
+        return False
+    engine = resolve_playback_engine(str(getattr(args, "playback_engine", "auto")))
+    return engine == "packed" or (engine == "auto" and should_auto_use_packed(midi_path))
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     args = parse_args(raw_argv)
@@ -288,9 +298,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args.playback_engine = resolve_playback_engine(str(getattr(args, "playback_engine", "auto")))
     no_args_mode = len(raw_argv) == 0
 
+    loaded_from_config_screen = False
+
     try:
         if no_args_mode:
             args = run_config_screen(args)
+            loaded_from_config_screen = True
         if args.drop_speed <= 0:
             raise ValueError("--drop-speed must be > 0")
         if args.x_scale <= 0:
@@ -325,13 +338,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not os.path.exists(args.midi):
             print(f"MIDI file not found: {args.midi}", file=sys.stderr)
             return 2
-        loaded = load_selected_playback_data(
-            str(args.midi),
-            stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
-            midi_flip=bool(getattr(args, "midi_flip", False)),
-            flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
-            playback_engine=str(getattr(args, "playback_engine", "auto")),
-        )
+        def load_playback_data():
+            return load_selected_playback_data(
+                str(args.midi),
+                stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
+                midi_flip=bool(getattr(args, "midi_flip", False)),
+                flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+                playback_engine=str(getattr(args, "playback_engine", "auto")),
+            )
+
+        if _should_use_loading_popup(args, from_config_screen=loaded_from_config_screen):
+            loaded = run_background_task_popup(
+                " Loading MIDI ",
+                "Preparing packed playback data.\nLarge black MIDI files may take a while.",
+                load_playback_data,
+                detail_prefix=f"Engine: {resolve_playback_engine(str(getattr(args, 'playback_engine', 'auto')))}",
+            )
+        else:
+            loaded = load_playback_data()
         spans = loaded.spans
         controls = loaded.controls
         measure_times = loaded.measure_times
