@@ -275,6 +275,10 @@ struct ActiveNote {
     span_idx: usize,
 }
 
+fn active_note_slot_index(track_idx: usize, channel: u8, note: u8) -> usize {
+    ((track_idx * 16 + usize::from(channel.min(15))) * 128) + usize::from(note)
+}
+
 struct NativeBuildRows {
     start_sec: Vec<f64>,
     end_sec: Vec<f64>,
@@ -1026,16 +1030,21 @@ where
     }
 
     let mode = normalize_stuck_note_fix_mode(stuck_note_fix_mode);
-    let mut start_sec: Vec<f64> = Vec::new();
-    let mut end_sec: Vec<f64> = Vec::new();
-    let mut note: Vec<u8> = Vec::new();
-    let mut velocity: Vec<u8> = Vec::new();
-    let mut channel: Vec<u8> = Vec::new();
-    let mut track: Vec<u32> = Vec::new();
-    let mut by_end: Vec<usize> = Vec::new();
-    let mut controls: Vec<NativeControl> = Vec::new();
+    let total_events: usize = track_events.iter().map(Vec::len).sum();
+    let estimated_note_rows = total_events / 2;
+    let slot_count = track_events.len().saturating_mul(16 * 128);
+
+    let mut start_sec: Vec<f64> = Vec::with_capacity(estimated_note_rows);
+    let mut end_sec: Vec<f64> = Vec::with_capacity(estimated_note_rows);
+    let mut note: Vec<u8> = Vec::with_capacity(estimated_note_rows);
+    let mut velocity: Vec<u8> = Vec::with_capacity(estimated_note_rows);
+    let mut channel: Vec<u8> = Vec::with_capacity(estimated_note_rows);
+    let mut track: Vec<u32> = Vec::with_capacity(estimated_note_rows);
+    let mut by_end: Vec<usize> = Vec::with_capacity(estimated_note_rows);
+    let mut controls: Vec<NativeControl> = Vec::with_capacity((total_events / 256).max(64));
     let mut measure_times: Vec<f64> = vec![0.0];
-    let mut on_map: HashMap<(u32, u8, u8), VecDeque<ActiveNote>> = HashMap::new();
+    let mut active_slots: Vec<VecDeque<ActiveNote>> = Vec::with_capacity(slot_count);
+    active_slots.resize_with(slot_count, VecDeque::new);
     let mut overlap_fixes = 0u64;
     let mut orphan_note_offs = 0u64;
     let mut max_tick = 0u64;
@@ -1108,21 +1117,23 @@ where
                 velocity.push(velocity_value);
                 channel.push(channel_value);
                 track.push(event.track);
-                on_map
-                    .entry((event.track, channel_value, note_value))
-                    .or_default()
-                    .push_back(ActiveNote {
-                        start_tick: event.tick,
-                        span_idx,
-                    });
+                let slot_idx =
+                    active_note_slot_index(event.track as usize, channel_value, note_value);
+                active_slots[slot_idx].push_back(ActiveNote {
+                    start_tick: event.tick,
+                    span_idx,
+                });
             }
             EventKind::NoteOff => {
                 let note_value = event.note();
                 let channel_value = event.channel;
-                let Some(queue) = on_map.get_mut(&(event.track, channel_value, note_value)) else {
+                let slot_idx =
+                    active_note_slot_index(event.track as usize, channel_value, note_value);
+                let queue = &mut active_slots[slot_idx];
+                if queue.is_empty() {
                     orphan_note_offs += 1;
                     continue;
-                };
+                }
                 let start = if (mode == "auto" || mode == "lifo") && queue.len() > 1 {
                     overlap_fixes += 1;
                     queue.pop_back()
@@ -1167,7 +1178,7 @@ where
         next_measure_tick = next_measure_tick.saturating_add(current_bar_ticks.max(1));
     }
 
-    let remaining_unmatched_note_ons = on_map.values().map(|q| q.len() as u64).sum();
+    let remaining_unmatched_note_ons = active_slots.iter().map(|q| q.len() as u64).sum();
     if remaining_unmatched_note_ons > 0 {
         let mut remap = vec![usize::MAX; start_sec.len()];
         let mut write = 0usize;
