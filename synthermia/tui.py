@@ -160,6 +160,7 @@ def run_background_task_popup(
     progress_fn: Optional[Callable[[], Dict[str, Any]]] = None,
     allow_cancel: bool = False,
     cancel_task: Optional[Callable[[], None]] = None,
+    stdscr: Optional["curses._CursesWindow"] = None,
 ) -> _TaskResultT:
     state: Dict[str, Any] = {
         "done": False,
@@ -266,7 +267,32 @@ def run_background_task_popup(
             detail=_format_detail(started_at),
         )
 
-    curses.wrapper(tui)
+    if stdscr is not None:
+        # Already inside an active curses session: render the popup directly on
+        # the live window. Using curses.wrapper() here would tear the outer
+        # session down on exit (keypad(False)/echo()/nocbreak()), which leaves
+        # the caller's screen with echo on and arrow keys undecoded (^[[A).
+        prev_curs = None
+        try:
+            prev_curs = curses.curs_set(0)
+        except Exception:
+            prev_curs = None
+        try:
+            tui(stdscr)
+        finally:
+            # Restore the blocking input mode the outer menu loop expects.
+            try:
+                stdscr.nodelay(False)
+                stdscr.timeout(-1)
+            except Exception:
+                pass
+            if prev_curs is not None:
+                try:
+                    curses.curs_set(prev_curs)
+                except Exception:
+                    pass
+    else:
+        curses.wrapper(tui)
     thread.join()
     if bool(state["cancel_requested"]):
         if state["error"] is not None and "cancel" not in str(state["error"]).lower():
@@ -722,6 +748,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             "Reading MIDI track summaries for the selected file.",
             refresh_track_entries,
             detail_prefix=os.path.basename(midi_path),
+            stdscr=stdscr,
         )
 
     def clamp_playback_fields() -> None:
@@ -824,6 +851,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             "Scanning SoundFont presets for instrument selection.",
             refresh_instrument_options,
             detail_prefix=f"{len(soundfont_list)} file(s)",
+            stdscr=stdscr,
         )
 
     clamp_playback_fields()
