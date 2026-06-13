@@ -87,6 +87,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--stuck-note-fix", choices=["auto", "off", "lifo"], default="auto")
     p.add_argument("--max-row-step", type=float, default=1.5, help="Flag center jumps larger than this many rows")
     p.add_argument("--max-height-step", type=int, default=1, help="Flag height changes larger than this many rows")
+    p.add_argument(
+        "--component",
+        choices=["bottom", "top", "largest", "all"],
+        default="bottom",
+        help="Which contiguous vertical component to track when multiple same-note bodies are visible",
+    )
     p.add_argument("--show-clean", action="store_true", help="Print every frame, not only anomalies")
     return p.parse_args(argv)
 
@@ -200,6 +206,32 @@ def component_gap(note_rows: Sequence[int], pedal_rows: Sequence[int]) -> Option
     return 0
 
 
+def contiguous_components(rows: Sequence[int]) -> List[Tuple[int, ...]]:
+    if not rows:
+        return []
+    components: List[List[int]] = [[int(rows[0])]]
+    for row in rows[1:]:
+        row_i = int(row)
+        if row_i == components[-1][-1] + 1:
+            components[-1].append(row_i)
+        else:
+            components.append([row_i])
+    return [tuple(component) for component in components]
+
+
+def select_component(rows: Sequence[int], mode: str) -> Tuple[int, ...]:
+    components = contiguous_components(rows)
+    if not components:
+        return ()
+    if mode == "all":
+        return tuple(rows)
+    if mode == "top":
+        return components[0]
+    if mode == "largest":
+        return max(components, key=lambda component: (len(component), component[-1]))
+    return components[-1]
+
+
 def detect_anomalies(samples: Sequence[FrameSample], max_row_step: float, max_height_step: int) -> List[str]:
     anomalies: List[str] = []
     prev: Optional[FrameSample] = None
@@ -283,7 +315,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             measure_times=None,
             note_direction=args.direction,
         )
-        rows, note_rows, pedal_rows = occupied_rows(
+        all_rows, all_note_rows, all_pedal_rows = occupied_rows(
             frame,
             play_rows,
             cols,
@@ -291,6 +323,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             normal_glyphs,
             pedal_glyphs,
         )
+        rows = select_component(all_rows, args.component)
+        selected = set(rows)
+        note_rows = tuple(row for row in all_note_rows if row in selected)
+        pedal_rows = tuple(row for row in all_pedal_rows if row in selected)
         samples.append(FrameSample(frame_idx, t, rows, note_rows, pedal_rows))
         frame_idx += 1
         t += frame_dt
@@ -298,7 +334,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     anomalies = detect_anomalies(samples, args.max_row_step, args.max_height_step)
 
     print(f"midi: {args.midi}")
-    print(f"note: {args.note}  columns: {cols.start}:{cols.stop - 1}  play_rows: {play_rows}")
+    print(
+        f"note: {args.note}  columns: {cols.start}:{cols.stop - 1}  "
+        f"play_rows: {play_rows}  component: {args.component}"
+    )
     print(f"time window: {start_t:.4f}s..{end_t:.4f}s  fps: {args.fps}")
     print()
     print("frame,time,top,bottom,center,height,all_rows,note_rows,pedal_rows,gap")
