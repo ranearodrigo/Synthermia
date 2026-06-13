@@ -769,28 +769,22 @@ def render_frame(
     black_fall_w = black_fall_width(x_scale)
     palette_cache: Dict[Tuple[int, int, int], Tuple[Tuple[int, int, int], Tuple[int, int, int]]] = {}
 
-    def build_pedal_alpha_lookup(pixels_per_second: float) -> Tuple[List[float], int]:
+    def pedal_cell_alpha_at_row(y: int, y1: int, y2: int) -> float:
+        # Lock pedal-tail opacity to the segment's position inside the rendered
+        # tail so old cells keep their color while only newly added cells dim.
         if pedal_decay <= 0.0:
-            return [pedal_alpha_scale] * (play_rows + 1), play_rows
-        fade_rows = max(0.0, float(pedal_decay) * max(1e-6, float(pixels_per_second)))
-        row_cap = max(0, int(math.ceil(fade_rows)) - 1)
-        alpha_by_dist = [
-            pedal_alpha_scale * max(0.0, 1.0 - (float(dist) / max(1e-6, fade_rows)))
-            for dist in range(play_rows + 1)
-        ]
-        return alpha_by_dist, row_cap
+            return pedal_alpha_scale
+        if direction == "up":
+            tail_age = max(0.0, float(y - y1)) / max(1e-6, float(length_speed))
+        else:
+            tail_age = max(0.0, float(y2 - y)) / max(1e-6, float(length_speed))
+        return pedal_alpha_scale * max(0.0, 1.0 - (tail_age / pedal_decay))
 
-    move_pedal_alpha_by_dist, move_pedal_row_cap = build_pedal_alpha_lookup(move_speed)
-    length_pedal_alpha_by_dist, length_pedal_row_cap = build_pedal_alpha_lookup(length_speed)
-
-    def pedal_visible_y1(y1: int, y2: int, row_cap: int) -> int:
+    def pedal_live_alpha_at_row(span_start: float, sample_t: float) -> float:
         if pedal_decay <= 0.0:
-            return y1
-        return max(y1, y2 - row_cap)
-
-    def pedal_cell_alpha_at_row(y: int, y2: int, alpha_by_dist: Sequence[float]) -> float:
-        dist = max(0, min(len(alpha_by_dist) - 1, y2 - y))
-        return float(alpha_by_dist[dist])
+            return pedal_alpha_scale
+        emitted_age = max(0.0, float(sample_t) - float(span_start))
+        return pedal_alpha_scale * max(0.0, 1.0 - (emitted_age / pedal_decay))
 
     def track_white_rgb(track_idx: int) -> Tuple[int, int, int]:
         if track_colors and track_idx in track_colors:
@@ -949,8 +943,13 @@ def render_frame(
         vel = max(1, min(127, int(getattr(sp, "velocity", 100))))
         x = note_x(sp.note, x_scale)
         if direction == "up":
+            # In live/upward mode, pedal tails should behave like emitted audio:
+            # each segment is born at the piano edge, moves upward, and keeps the
+            # opacity it had when emitted instead of freezing as a full-height band.
             sample_t_lo = max(float(sp.start), float(t) - (float(hit_row) / max(1e-6, float(move_speed))))
             sample_t_hi = min(float(sp.end), float(t))
+            if pedal_decay > 0.0:
+                sample_t_hi = min(sample_t_hi, float(sp.start) + pedal_decay)
             if sample_t_hi < sample_t_lo:
                 continue
             y_top = max(
@@ -963,14 +962,17 @@ def render_frame(
             )
             if y_bottom < y_top:
                 continue
-            y_top = pedal_visible_y1(y_top, y_bottom, move_pedal_row_cap)
-            if y_bottom < y_top:
+            row_samples: List[Tuple[int, float, float]] = []
+            for y in range(y_top, y_bottom + 1):
+                sample_t = float(t) - (float(hit_row - y) / max(1e-6, float(move_speed)))
+                pedal_cell_alpha = pedal_live_alpha_at_row(float(sp.start), sample_t)
+                if pedal_cell_alpha <= 0.0:
+                    continue
+                row_samples.append((y, sample_t, pedal_cell_alpha))
+            if not row_samples:
                 continue
             if is_white(sp.note):
-                for y in range(y_top, y_bottom + 1):
-                    pedal_cell_alpha = pedal_cell_alpha_at_row(y, y_bottom, move_pedal_alpha_by_dist)
-                    if pedal_cell_alpha <= 0.0:
-                        continue
+                for y, _sample_t, pedal_cell_alpha in row_samples:
                     for dx in range(white_w):
                         xx = x + dx
                         if 0 <= xx < cols:
@@ -999,10 +1001,7 @@ def render_frame(
                     + (note_pedal_black_mid * (bw - 2))
                     + note_pedal_black_right
                 )
-            for y in range(y_top, y_bottom + 1):
-                pedal_cell_alpha = pedal_cell_alpha_at_row(y, y_bottom, move_pedal_alpha_by_dist)
-                if pedal_cell_alpha <= 0.0:
-                    continue
+            for y, _sample_t, pedal_cell_alpha in row_samples:
                 for dx in range(bw):
                     xx = x0 + dx
                     if 0 <= xx < cols:
@@ -1017,10 +1016,9 @@ def render_frame(
                         )
             continue
         if is_white(sp.note):
-            y1 = pedal_visible_y1(y1, y2, length_pedal_row_cap)
             for y in range(y1, y2 + 1):
                 if 0 <= y < play_rows:
-                    pedal_cell_alpha = pedal_cell_alpha_at_row(y, y2, length_pedal_alpha_by_dist)
+                    pedal_cell_alpha = pedal_cell_alpha_at_row(y, y1, y2)
                     if pedal_cell_alpha <= 0.0:
                         continue
                     for dx in range(white_w):
@@ -1051,10 +1049,9 @@ def render_frame(
                     + (note_pedal_black_mid * (bw - 2))
                     + note_pedal_black_right
                 )
-            y1 = pedal_visible_y1(y1, y2, length_pedal_row_cap)
             for y in range(y1, y2 + 1):
                 if 0 <= y < play_rows:
-                    pedal_cell_alpha = pedal_cell_alpha_at_row(y, y2, length_pedal_alpha_by_dist)
+                    pedal_cell_alpha = pedal_cell_alpha_at_row(y, y1, y2)
                     if pedal_cell_alpha <= 0.0:
                         continue
                     for dx in range(bw):
