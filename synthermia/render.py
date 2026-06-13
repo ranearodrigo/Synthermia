@@ -953,8 +953,10 @@ def render_frame(
             sample_t_hi = min(float(sp.end), float(t))
             if sample_t_hi < sample_t_lo:
                 continue
+            # Align the first tail row with the note body's release row so the
+            # pedal segment cannot visually detach by one empty cell.
             raw_y_top = int(
-                math.ceil(float(hit_row) - ((float(t) - sample_t_lo) * float(move_speed)) - 1e-6)
+                math.floor(float(hit_row) - ((float(t) - sample_t_lo) * float(move_speed)))
             )
             raw_y_bottom = int(
                 math.floor(float(hit_row) - ((float(t) - sample_t_hi) * float(move_speed)) + 1e-6)
