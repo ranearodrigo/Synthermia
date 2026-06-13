@@ -915,6 +915,15 @@ def render_frame(
             return note_black_mid
         return note_black_mid
 
+    def project_downward_bottom_row(start_val: float) -> int:
+        # Keep future spans from rounding one row too high before they reach
+        # the note seam. This makes back-to-back note/pedal segments share the
+        # same discrete row projection instead of opening a 1-cell hole.
+        row_pos = float(hit_row) + ((float(t) - float(start_val)) * float(move_speed))
+        if t < start_val:
+            return int(math.ceil(row_pos))
+        return int(math.floor(row_pos))
+
     def span_geometry(start_val: float, end_val: float) -> Optional[Tuple[int, int, int, int]]:
         if direction == "up":
             # For upward mode, keep active notes anchored at the piano edge and
@@ -927,7 +936,7 @@ def render_frame(
             y2 = y_bot
         else:
             pixel_len = max(1, int(round((end_val - start_val) * length_speed)))
-            y_bot = int(math.floor(hit_row + (t - start_val) * move_speed))
+            y_bot = project_downward_bottom_row(start_val)
             y1 = y_bot - pixel_len + 1
             y2 = y_bot
         if y2 < 0 or y1 > hit_row:
