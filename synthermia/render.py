@@ -927,9 +927,14 @@ def render_frame(
             y2 = y_bot
         else:
             front_edge = float(hit_row) + ((float(t) - float(start_val)) * float(move_speed))
-            back_edge = front_edge - (max(0.0, float(end_val) - float(start_val)) * float(length_speed))
-            y1 = int(math.ceil(back_edge - 0.5))
-            y2 = int(math.floor(front_edge + 0.5))
+            pixel_len = max(1, int(round(max(0.0, float(end_val) - float(start_val)) * length_speed)))
+            if front_edge < float(hit_row):
+                y2 = int(math.floor(front_edge + 0.5))
+                y1 = y2 - pixel_len + 1
+            else:
+                back_edge = front_edge - (max(0.0, float(end_val) - float(start_val)) * float(length_speed))
+                y2 = hit_row
+                y1 = max(y2 - pixel_len + 1, int(math.ceil(back_edge - 0.5)))
         if y2 < 0 or y1 > hit_row:
             return None
         return max(0, y1), min(hit_row, y2), y1, y2
