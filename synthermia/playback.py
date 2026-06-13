@@ -1107,9 +1107,16 @@ def playback(
     keybuf = ""
     set_play_clock(play_t)
 
-    try:
+    def restore_terminal_input_mode() -> None:
+        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_term)
+        fcntl.fcntl(stdin_fd, fcntl.F_SETFL, old_flags)
+
+    def enter_playback_input_mode() -> None:
         tty.setcbreak(stdin_fd)
         fcntl.fcntl(stdin_fd, fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
+
+    try:
+        enter_playback_input_mode()
         sync_audio_to_time(play_t)
 
         while True:
@@ -1143,14 +1150,14 @@ def playback(
                     stop_audio_only()
                     args.start = resume_hint
                     save_last_config(args_to_saved_config(args, str(getattr(args, "midi", ""))))
+                    restore_terminal_input_mode()
                     args = run_config_screen(args)
                     release_audio_runtime()
                     rebuild_playback_runtime(
                         float(getattr(args, "start", resume_hint)),
                         show_loading_popup=True,
                     )
-                    tty.setcbreak(stdin_fd)
-                    fcntl.fcntl(stdin_fd, fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
+                    enter_playback_input_mode()
                     keybuf = ""
                 elif key == "LEFT":
                     play_t = max(0.0, play_t - 5.0)
@@ -1360,8 +1367,7 @@ def playback(
         stop_process(audio_proc)
         if audio_temp_midi and os.path.exists(audio_temp_midi):
             os.unlink(audio_temp_midi)
-        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_term)
-        fcntl.fcntl(stdin_fd, fcntl.F_SETFL, old_flags)
+        restore_terminal_input_mode()
         _safe_stdout_write("\x1b[0m\x1b[?25h\n")
 
 
