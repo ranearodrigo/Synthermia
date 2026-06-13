@@ -783,13 +783,8 @@ def render_frame(
     move_pedal_alpha_by_dist, move_pedal_row_cap = build_pedal_alpha_lookup(move_speed)
     length_pedal_alpha_by_dist, length_pedal_row_cap = build_pedal_alpha_lookup(length_speed)
 
-    def pedal_visible_y1(y1: int, y2: int, row_cap: int) -> int:
-        if pedal_decay <= 0.0:
-            return y1
-        return max(y1, y2 - row_cap)
-
-    def pedal_cell_alpha_at_row(y: int, y2: int, alpha_by_dist: Sequence[float]) -> float:
-        dist = max(0, min(len(alpha_by_dist) - 1, y2 - y))
+    def pedal_cell_alpha_for_distance(dist: int, alpha_by_dist: Sequence[float]) -> float:
+        dist = max(0, min(len(alpha_by_dist) - 1, int(dist)))
         return float(alpha_by_dist[dist])
 
     def track_white_rgb(track_idx: int) -> Tuple[int, int, int]:
@@ -965,12 +960,16 @@ def render_frame(
             y_bottom = min(hit_row, raw_y_bottom)
             if y_bottom < y_top:
                 continue
-            y_top = max(y_top, pedal_visible_y1(raw_y_top, raw_y_bottom, move_pedal_row_cap))
+            if pedal_decay > 0.0:
+                y_bottom = min(y_bottom, raw_y_top + move_pedal_row_cap)
             if y_bottom < y_top:
                 continue
             if is_white(sp.note):
                 for y in range(y_top, y_bottom + 1):
-                    pedal_cell_alpha = pedal_cell_alpha_at_row(y, raw_y_bottom, move_pedal_alpha_by_dist)
+                    pedal_cell_alpha = pedal_cell_alpha_for_distance(
+                        y - raw_y_top,
+                        move_pedal_alpha_by_dist,
+                    )
                     if pedal_cell_alpha <= 0.0:
                         continue
                     for dx in range(white_w):
@@ -1002,7 +1001,10 @@ def render_frame(
                     + note_pedal_black_right
                 )
             for y in range(y_top, y_bottom + 1):
-                pedal_cell_alpha = pedal_cell_alpha_at_row(y, raw_y_bottom, move_pedal_alpha_by_dist)
+                pedal_cell_alpha = pedal_cell_alpha_for_distance(
+                    y - raw_y_top,
+                    move_pedal_alpha_by_dist,
+                )
                 if pedal_cell_alpha <= 0.0:
                     continue
                 for dx in range(bw):
@@ -1019,10 +1021,14 @@ def render_frame(
                         )
             continue
         if is_white(sp.note):
-            y1 = max(y1, pedal_visible_y1(raw_y1, raw_y2, length_pedal_row_cap))
+            if pedal_decay > 0.0:
+                y1 = max(y1, raw_y2 - length_pedal_row_cap)
             for y in range(y1, y2 + 1):
                 if 0 <= y < play_rows:
-                    pedal_cell_alpha = pedal_cell_alpha_at_row(y, raw_y2, length_pedal_alpha_by_dist)
+                    pedal_cell_alpha = pedal_cell_alpha_for_distance(
+                        raw_y2 - y,
+                        length_pedal_alpha_by_dist,
+                    )
                     if pedal_cell_alpha <= 0.0:
                         continue
                     for dx in range(white_w):
@@ -1053,10 +1059,14 @@ def render_frame(
                     + (note_pedal_black_mid * (bw - 2))
                     + note_pedal_black_right
                 )
-            y1 = max(y1, pedal_visible_y1(raw_y1, raw_y2, length_pedal_row_cap))
+            if pedal_decay > 0.0:
+                y1 = max(y1, raw_y2 - length_pedal_row_cap)
             for y in range(y1, y2 + 1):
                 if 0 <= y < play_rows:
-                    pedal_cell_alpha = pedal_cell_alpha_at_row(y, raw_y2, length_pedal_alpha_by_dist)
+                    pedal_cell_alpha = pedal_cell_alpha_for_distance(
+                        raw_y2 - y,
+                        length_pedal_alpha_by_dist,
+                    )
                     if pedal_cell_alpha <= 0.0:
                         continue
                     for dx in range(bw):
