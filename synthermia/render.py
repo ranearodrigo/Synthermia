@@ -915,7 +915,7 @@ def render_frame(
             return note_black_mid
         return note_black_mid
 
-    def span_bounds(start_val: float, end_val: float) -> Optional[Tuple[int, int]]:
+    def span_geometry(start_val: float, end_val: float) -> Optional[Tuple[int, int, int, int]]:
         if direction == "up":
             # For upward mode, keep active notes anchored at the piano edge and
             # only move them upward after release. This avoids base flicker.
@@ -932,7 +932,7 @@ def render_frame(
             y2 = y_bot
         if y2 < 0 or y1 > hit_row:
             return None
-        return max(0, y1), min(hit_row, y2)
+        return max(0, y1), min(hit_row, y2), y1, y2
 
     for sp in (pedal_spans or ()):
         if sp.end < t0:
@@ -941,10 +941,10 @@ def render_frame(
             break
         if not (note_lo <= sp.note <= note_hi):
             continue
-        y_pair = span_bounds(float(sp.start), float(sp.end))
-        if y_pair is None:
+        y_geom = span_geometry(float(sp.start), float(sp.end))
+        if y_geom is None:
             continue
-        y1, y2 = y_pair
+        y1, y2, raw_y1, raw_y2 = y_geom
         trk = int(getattr(sp, "track", 0))
         vel = max(1, min(127, int(getattr(sp, "velocity", 100))))
         x = note_x(sp.note, x_scale)
@@ -953,22 +953,22 @@ def render_frame(
             sample_t_hi = min(float(sp.end), float(t))
             if sample_t_hi < sample_t_lo:
                 continue
-            y_top = max(
-                0,
-                int(math.ceil(float(hit_row) - ((float(t) - sample_t_lo) * float(move_speed)) - 1e-6)),
+            raw_y_top = int(
+                math.ceil(float(hit_row) - ((float(t) - sample_t_lo) * float(move_speed)) - 1e-6)
             )
-            y_bottom = min(
-                hit_row,
-                int(math.floor(float(hit_row) - ((float(t) - sample_t_hi) * float(move_speed)) + 1e-6)),
+            raw_y_bottom = int(
+                math.floor(float(hit_row) - ((float(t) - sample_t_hi) * float(move_speed)) + 1e-6)
             )
+            y_top = max(0, raw_y_top)
+            y_bottom = min(hit_row, raw_y_bottom)
             if y_bottom < y_top:
                 continue
-            y_top = pedal_visible_y1(y_top, y_bottom, move_pedal_row_cap)
+            y_top = max(y_top, pedal_visible_y1(raw_y_top, raw_y_bottom, move_pedal_row_cap))
             if y_bottom < y_top:
                 continue
             if is_white(sp.note):
                 for y in range(y_top, y_bottom + 1):
-                    pedal_cell_alpha = pedal_cell_alpha_at_row(y, y_bottom, move_pedal_alpha_by_dist)
+                    pedal_cell_alpha = pedal_cell_alpha_at_row(y, raw_y_bottom, move_pedal_alpha_by_dist)
                     if pedal_cell_alpha <= 0.0:
                         continue
                     for dx in range(white_w):
@@ -1000,7 +1000,7 @@ def render_frame(
                     + note_pedal_black_right
                 )
             for y in range(y_top, y_bottom + 1):
-                pedal_cell_alpha = pedal_cell_alpha_at_row(y, y_bottom, move_pedal_alpha_by_dist)
+                pedal_cell_alpha = pedal_cell_alpha_at_row(y, raw_y_bottom, move_pedal_alpha_by_dist)
                 if pedal_cell_alpha <= 0.0:
                     continue
                 for dx in range(bw):
@@ -1017,10 +1017,10 @@ def render_frame(
                         )
             continue
         if is_white(sp.note):
-            y1 = pedal_visible_y1(y1, y2, length_pedal_row_cap)
+            y1 = max(y1, pedal_visible_y1(raw_y1, raw_y2, length_pedal_row_cap))
             for y in range(y1, y2 + 1):
                 if 0 <= y < play_rows:
-                    pedal_cell_alpha = pedal_cell_alpha_at_row(y, y2, length_pedal_alpha_by_dist)
+                    pedal_cell_alpha = pedal_cell_alpha_at_row(y, raw_y2, length_pedal_alpha_by_dist)
                     if pedal_cell_alpha <= 0.0:
                         continue
                     for dx in range(white_w):
@@ -1051,10 +1051,10 @@ def render_frame(
                     + (note_pedal_black_mid * (bw - 2))
                     + note_pedal_black_right
                 )
-            y1 = pedal_visible_y1(y1, y2, length_pedal_row_cap)
+            y1 = max(y1, pedal_visible_y1(raw_y1, raw_y2, length_pedal_row_cap))
             for y in range(y1, y2 + 1):
                 if 0 <= y < play_rows:
-                    pedal_cell_alpha = pedal_cell_alpha_at_row(y, y2, length_pedal_alpha_by_dist)
+                    pedal_cell_alpha = pedal_cell_alpha_at_row(y, raw_y2, length_pedal_alpha_by_dist)
                     if pedal_cell_alpha <= 0.0:
                         continue
                     for dx in range(bw):
@@ -1123,10 +1123,10 @@ def render_frame(
                 vel_w = max(1.0, float(max(1, sp_velocity)))
                 active_weighted_colors_by_note.setdefault(sp_note, []).append((track_white_rgb(trk), vel_w))
 
-            y_pair = span_bounds(sp_start, sp_end)
-            if y_pair is None:
+            y_geom = span_geometry(sp_start, sp_end)
+            if y_geom is None:
                 continue
-            y1, y2 = y_pair
+            y1, y2, _raw_y1, _raw_y2 = y_geom
             x = note_x(sp_note, x_scale)
             add_unique_track(visible_tracks_by_note, sp_note, trk)
 
