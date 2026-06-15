@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+import termios
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, TypeVar
 
@@ -118,6 +119,32 @@ def _suppress_stderr_fd() -> Any:
                 os.close(devnull_fd)
             except OSError:
                 pass
+
+
+@contextlib.contextmanager
+def _disable_terminal_flow_control() -> Any:
+    try:
+        fd = sys.stdin.fileno()
+        attrs = termios.tcgetattr(fd)
+    except Exception:
+        yield
+        return
+    new_attrs = [list(item) if isinstance(item, list) else item for item in attrs]
+    try:
+        new_attrs[0] &= ~termios.IXON
+        if hasattr(termios, "IXOFF"):
+            new_attrs[0] &= ~termios.IXOFF
+        termios.tcsetattr(fd, termios.TCSADRAIN, new_attrs)
+    except Exception:
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+        except Exception:
+            pass
 
 def _edit_text_popup(stdscr: "curses._CursesWindow", label: str, value: str) -> str:
     h, w = stdscr.getmaxyx()
@@ -1196,7 +1223,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                         continue
                     if ent.is_dir(follow_symlinks=False):
                         dirs.append(n)
-                    elif ent.is_file(follow_symlinks=False) and n.lower().endswith(exts):
+                    elif ent.is_file(follow_symlinks=False) and ((not exts) or n.lower().endswith(exts)):
                         files.append(n)
             except Exception:
                 pass
@@ -1339,6 +1366,15 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             title=" SoundFont Selector ",
             file_tag="SF2",
             extensions=(".sf2", ".sf3"),
+        )
+
+    def choose_any_file(stdscr: "curses._CursesWindow", current_value: str) -> Optional[str]:
+        return choose_file_by_ext(
+            stdscr,
+            current_value,
+            title=" File Selector ",
+            file_tag="FILE",
+            extensions=(),
         )
 
     def choose_soundfont_library(
@@ -1683,7 +1719,8 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         box = curses.textpad.Textbox(edit_win, insert_mode=True)
         try:
             curses.curs_set(1)
-            result = box.edit(validator)
+            with _disable_terminal_flow_control():
+                result = box.edit(validator)
             return str(result).replace("\r\n", "\n").replace("\r", "\n").strip("\n")
         except KeyboardInterrupt:
             return None
@@ -1726,8 +1763,8 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                 status_msg = "Reverted to built-in default pattern."
                 continue
             if k in (ord("l"), ord("L")):
-                typed = _edit_text_popup(stdscr, "Pattern File Path", "")
-                path_txt = str(typed).strip()
+                picked = choose_any_file(stdscr, "")
+                path_txt = str(picked or "").strip()
                 if not path_txt:
                     status_msg = "No file selected."
                     continue
