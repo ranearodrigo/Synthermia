@@ -1721,7 +1721,8 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             curses.curs_set(1)
             with _disable_terminal_flow_control():
                 result = box.edit(validator)
-            return str(result).replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+            normalized = str(result).replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+            return "\n".join(line.rstrip(" \t") for line in normalized.split("\n"))
         except KeyboardInterrupt:
             return None
         finally:
