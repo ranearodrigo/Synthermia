@@ -1649,7 +1649,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         win.erase()
         win.box()
         win.addstr(0, max(2, (box_w - len(title)) // 2), title[: max(1, box_w - 4)], curses.A_BOLD)
-        help_line = "Paste/edit text. Ctrl-G saves, Esc cancels."
+        help_line = "Paste/edit text. Ctrl-S/F2/Ctrl-G save, Esc cancels."
         win.addstr(1, 2, help_line[: max(1, box_w - 4)])
         edit_h = max(1, box_h - 4)
         edit_w = max(1, box_w - 4)
@@ -1666,6 +1666,8 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         def validator(ch: int) -> int:
             if ch == 27:
                 raise KeyboardInterrupt()
+            if ch in (19, curses.KEY_F2):
+                return 7
             return ch
 
         box = curses.textpad.Textbox(edit_win, insert_mode=True)
