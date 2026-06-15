@@ -987,6 +987,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         offset = 0
         filter_text = ""
         filter_editing = False
+        current_abs = os.path.abspath(current_value) if str(current_value or "").strip() else ""
 
         def rel_display(path: str) -> str:
             try:
@@ -1019,6 +1020,17 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             for n in sorted(files, key=str.lower):
                 entries.append(("file", n, os.path.join(path, n)))
             return entries
+
+        def entry_index_for_path(entries: Sequence[Tuple[str, str, str]], path: str) -> int:
+            if not path:
+                return 0
+            target = os.path.abspath(path)
+            for idx, (_kind, _name, full) in enumerate(entries):
+                if os.path.abspath(full) == target:
+                    return idx
+            return 0
+
+        selected = entry_index_for_path(load_entries(cur_dir), current_abs)
 
         while True:
             all_entries = load_entries(cur_dir)

@@ -927,12 +927,47 @@ def render_frame(
             y2 = y_bot
         else:
             front_edge = float(hit_row) + ((float(t) - float(start_val)) * float(move_speed))
-            back_edge = front_edge - (max(0.0, float(end_val) - float(start_val)) * float(length_speed))
-            y1 = int(math.ceil(back_edge - 0.5))
+            span_rows = max(0.0, float(end_val) - float(start_val)) * float(length_speed)
             y2 = int(math.floor(front_edge + 0.5))
+            if y2 <= hit_row:
+                pixel_len = max(1, int(math.floor(span_rows + 0.5)) + 1)
+                y1 = y2 - pixel_len + 1
+            else:
+                back_edge = front_edge - span_rows
+                y1 = int(math.ceil(back_edge - 0.5))
         if y2 < 0 or y1 > hit_row:
             return None
         return max(0, y1), min(hit_row, y2), y1, y2
+
+    def span_time_key(value: float) -> int:
+        return int(round(float(value) * 1_000_000.0))
+
+    adjacent_note_top_by_end: Dict[Tuple[int, int, int, int], int] = {}
+    if direction == "down" and pedal_spans:
+        # Pedal tails begin where their source note ends. Cache the rendered
+        # note top so the tail can share that seam without a one-row gap or overlap.
+        for sp in spans:
+            if packed_span_mode:
+                sp_note, sp_start, sp_end, _sp_velocity, sp_channel, sp_track = sp  # type: ignore[misc]
+            else:
+                sp_note = int(sp.note)  # type: ignore[union-attr]
+                sp_start = float(sp.start)  # type: ignore[union-attr]
+                sp_end = float(sp.end)  # type: ignore[union-attr]
+                sp_channel = int(getattr(sp, "channel", 0))  # type: ignore[arg-type]
+                sp_track = int(getattr(sp, "track", 0))  # type: ignore[arg-type]
+            if sp_end < t0:
+                continue
+            if sp_start > t1:
+                break
+            if not (note_lo <= sp_note <= note_hi):
+                continue
+            y_geom = span_geometry(float(sp_start), float(sp_end))
+            if y_geom is None:
+                continue
+            y1, _y2, _raw_y1, _raw_y2 = y_geom
+            key = (int(sp_note), int(sp_channel), int(sp_track), span_time_key(float(sp_end)))
+            prev = adjacent_note_top_by_end.get(key)
+            adjacent_note_top_by_end[key] = y1 if prev is None else min(prev, y1)
 
     for sp in (pedal_spans or ()):
         if sp.end < t0:
@@ -946,6 +981,29 @@ def render_frame(
             continue
         y1, y2, raw_y1, raw_y2 = y_geom
         trk = int(getattr(sp, "track", 0))
+        if direction == "down":
+            seam_key = (
+                int(sp.note),
+                int(getattr(sp, "channel", 0)),
+                trk,
+                span_time_key(float(sp.start)),
+            )
+            adjacent_top = adjacent_note_top_by_end.get(seam_key)
+            if adjacent_top is not None:
+                # The note owns the seam row; keep the pedal tail immediately above it.
+                target_y2 = int(adjacent_top) - 1
+                if y2 != target_y2:
+                    visible_len = max(1, y2 - y1 + 1)
+                    y2 = target_y2
+                    y1 = y2 - visible_len + 1
+                    raw_y2 = min(raw_y2, y2)
+                    raw_y1 = min(raw_y1, y1)
+                    if y2 < 0 or y1 > hit_row:
+                        continue
+                    y1 = max(0, y1)
+                    y2 = min(hit_row, y2)
+                    if y2 < y1:
+                        continue
         vel = max(1, min(127, int(getattr(sp, "velocity", 100))))
         x = note_x(sp.note, x_scale)
         if direction == "up":
