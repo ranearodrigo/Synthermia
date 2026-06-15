@@ -558,7 +558,7 @@ def playback(
     measure_times: Optional[Sequence[float]] = None,
     packed_source: Optional[PackedPlaybackSource] = None,
     pending_packed_task: Optional[BackgroundPlaybackLoadTask] = None,
-) -> None:
+) -> bool:
     spans_active = list(spans or [])
     if (not spans_active) and packed_source is None:
         raise ValueError("No playable notes found in MIDI")
@@ -1190,7 +1190,7 @@ def playback(
                     elif not paused and args.soundfont:
                         sync_audio_to_time(play_t)
                 elif key in {"q", "Q"}:
-                    return
+                    return False
 
             if pending_packed_task is not None:
                 if pending_packed_task.done():
@@ -1361,6 +1361,7 @@ def playback(
             sleep_for = frame_dt - (time.perf_counter() - now)
             if sleep_for > 0:
                 time.sleep(sleep_for)
+        return True
     finally:
         if py_audio is not None:
             py_audio.close()

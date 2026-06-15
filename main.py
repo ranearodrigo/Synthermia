@@ -467,7 +467,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
 
             save_last_config(args_to_saved_config(args, selected_midi_for_config))
-            playback(
+            finished_naturally = playback(
                 spans,
                 args,
                 controls=controls,
@@ -475,6 +475,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 packed_source=loaded.packed_source,
                 pending_packed_task=pending_packed_task,
             )
+            if no_args_mode and loaded_from_config_screen and finished_naturally:
+                continue
             return 0
     except KeyboardInterrupt:
         return 130
