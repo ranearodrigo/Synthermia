@@ -1651,9 +1651,16 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         win.addstr(0, max(2, (box_w - len(title)) // 2), title[: max(1, box_w - 4)], curses.A_BOLD)
         help_line = "Paste/edit text. Ctrl-S/F2/Ctrl-G save, Esc cancels."
         win.addstr(1, 2, help_line[: max(1, box_w - 4)])
-        edit_h = max(1, box_h - 4)
-        edit_w = max(1, box_w - 4)
-        edit_win = win.derwin(edit_h, edit_w, 2, 2)
+        frame_top = 2
+        frame_left = 2
+        frame_h = max(3, box_h - 4)
+        frame_w = max(3, box_w - 4)
+        frame_win = win.derwin(frame_h, frame_w, frame_top, frame_left)
+        frame_win.erase()
+        frame_win.box()
+        edit_h = max(1, frame_h - 2)
+        edit_w = max(1, frame_w - 2)
+        edit_win = frame_win.derwin(edit_h, edit_w, 1, 1)
         edit_win.erase()
         initial_lines = str(initial_value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
         for row, line in enumerate(initial_lines[:edit_h]):
