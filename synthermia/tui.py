@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import curses
 import os
 import random
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -79,6 +81,42 @@ _TaskResultT = TypeVar("_TaskResultT")
 
 class BackgroundTaskCancelled(Exception):
     pass
+
+
+@contextlib.contextmanager
+def _suppress_stderr_fd() -> Any:
+    try:
+        sys.stderr.flush()
+    except Exception:
+        pass
+    try:
+        saved_fd = os.dup(2)
+    except OSError:
+        yield
+        return
+    devnull_fd = -1
+    try:
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull_fd, 2)
+        yield
+    finally:
+        try:
+            sys.stderr.flush()
+        except Exception:
+            pass
+        try:
+            os.dup2(saved_fd, 2)
+        except OSError:
+            pass
+        try:
+            os.close(saved_fd)
+        except OSError:
+            pass
+        if devnull_fd >= 0:
+            try:
+                os.close(devnull_fd)
+            except OSError:
+                pass
 
 def _edit_text_popup(stdscr: "curses._CursesWindow", label: str, value: str) -> str:
     h, w = stdscr.getmaxyx()
@@ -1689,10 +1727,11 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                 except Exception:
                     pass
                 if close_player:
-                    try:
-                        demo_player.close()
-                    except Exception:
-                        pass
+                    with _suppress_stderr_fd():
+                        try:
+                            demo_player.close()
+                        except Exception:
+                            pass
                     demo_player = None
 
         def start_demo_python(option_text: str) -> Optional[str]:
@@ -1709,31 +1748,33 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             period_size = int(state.get("audio_period_size", 0) or 0)
             periods = int(state.get("audio_periods", 0) or 0)
             try:
-                if demo_player is None:
-                    demo_player = RealtimeFluidSynthPlayer(
-                        spans=demo_preview_spans,
-                        soundfont_path=soundfont,
-                        audio_gain=gain,
-                        driver=driver,
-                        output_target=str(state.get("audio_output", "")),
-                        samplerate=samplerate,
-                        period_size=period_size,
-                        periods=periods,
-                        channel_programs={0: pair},
-                        control_events=[],
-                    )
-                else:
-                    demo_player.set_channel_program(0, pair[0], pair[1])
-                    demo_player.set_gain(gain)
-                demo_player.seek(0.0)
+                with _suppress_stderr_fd():
+                    if demo_player is None:
+                        demo_player = RealtimeFluidSynthPlayer(
+                            spans=demo_preview_spans,
+                            soundfont_path=soundfont,
+                            audio_gain=gain,
+                            driver=driver,
+                            output_target=str(state.get("audio_output", "")),
+                            samplerate=samplerate,
+                            period_size=period_size,
+                            periods=periods,
+                            channel_programs={0: pair},
+                            control_events=[],
+                        )
+                    else:
+                        demo_player.set_channel_program(0, pair[0], pair[1])
+                        demo_player.set_gain(gain)
+                    demo_player.seek(0.0)
                 demo_started_perf = time.perf_counter()
                 return None
             except Exception as exc:
                 if demo_player is not None:
-                    try:
-                        demo_player.close()
-                    except Exception:
-                        pass
+                    with _suppress_stderr_fd():
+                        try:
+                            demo_player.close()
+                        except Exception:
+                            pass
                     demo_player = None
                 demo_started_perf = None
                 return str(exc)
