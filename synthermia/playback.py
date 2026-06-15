@@ -1161,6 +1161,8 @@ def playback(
                         show_loading_popup=True,
                     )
                     enter_playback_input_mode()
+                    paused = False
+                    sync_audio_to_time(play_t)
                     keybuf = ""
                 elif key == "LEFT":
                     play_t = max(0.0, play_t - 5.0)
