@@ -666,6 +666,7 @@ def playback(
     frame_dt = 1.0 / max(1, args.fps)
     title = os.path.basename(args.midi)
     use_offpiano_pattern = not args.no_offpiano_pattern
+    custom_offpiano_pattern = str(getattr(args, "offpiano_pattern", ""))
     audio_gain = float(args.audio_gain)
     audio_engine = str(getattr(args, "audio_engine", "python")).strip().lower()
     if audio_engine not in {"python", "cli"}:
@@ -705,7 +706,7 @@ def playback(
         nonlocal span_window_index, packed_source_active, pedal_visual_spans, pedal_window_index
         nonlocal default_program, track_programs, soundfont_paths, valid_pairs_by_sf, requires_python_audio
         nonlocal audio_spans, channel_programs, channel_soundfonts, source_channels, track_default_channels, audio_controls
-        nonlocal start_time, end_time, frame_dt, title, use_offpiano_pattern, audio_gain
+        nonlocal start_time, end_time, frame_dt, title, use_offpiano_pattern, custom_offpiano_pattern, audio_gain
         nonlocal audio_engine, audio_engine_active, play_t, clock_anchor_t, clock_anchor_perf, paused
         nonlocal py_audio, audio_proc, audio_temp_midi, audio_cache_key, pending_packed_task
 
@@ -866,6 +867,7 @@ def playback(
         frame_dt = 1.0 / max(1, int(args.fps))
         title = os.path.basename(midi_path)
         use_offpiano_pattern = not args.no_offpiano_pattern
+        custom_offpiano_pattern = str(getattr(args, "offpiano_pattern", ""))
         audio_gain = float(args.audio_gain)
         audio_engine = str(getattr(args, "audio_engine", "python")).strip().lower()
         if audio_engine not in {"python", "cli"}:
@@ -881,7 +883,7 @@ def playback(
         if width <= 0:
             return ""
         if use_offpiano_pattern:
-            return ornamental_fill(width, row, phase)
+            return ornamental_fill(width, row, phase, pattern_text=custom_offpiano_pattern)
         return " " * width
 
     def set_play_clock(midi_time: float, perf_time: Optional[float] = None) -> None:
@@ -1456,6 +1458,7 @@ def playback_live_midi_input(args: argparse.Namespace) -> None:
     frame_cols = keyboard_width(note_lo, note_hi, effective_x_scale)
     show_piano = not bool(getattr(args, "hide_piano", False))
     use_offpiano_pattern = not args.no_offpiano_pattern
+    custom_offpiano_pattern = str(getattr(args, "offpiano_pattern", ""))
     track_color_map: Dict[int, Tuple[int, int, int]] = {}
     terminal_bg_rgb = resolve_terminal_bg_rgb(str(getattr(args, "terminal_bg_color", "")))
     visual_glyphs = resolve_visual_glyphs(args)
@@ -1551,7 +1554,7 @@ def playback_live_midi_input(args: argparse.Namespace) -> None:
         if width <= 0:
             return ""
         if use_offpiano_pattern:
-            return ornamental_fill(width, row, phase)
+            return ornamental_fill(width, row, phase, pattern_text=custom_offpiano_pattern)
         return " " * width
 
 

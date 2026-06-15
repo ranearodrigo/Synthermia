@@ -292,22 +292,32 @@ ORNAMENT_PATTERN = r"""
    '`-.,  /       /   `.      `--'  o `.      \ /     `-;.    ,'    ,-
 """
 
-PATTERN_LINES = [ln for ln in ORNAMENT_PATTERN.splitlines() if ln]
-PATTERN_H = max(1, len(PATTERN_LINES))
-PATTERN_W = max(1, max(len(ln) for ln in PATTERN_LINES))
-PATTERN_GRID = [ln.ljust(PATTERN_W) for ln in PATTERN_LINES]
+def normalize_ornament_pattern_text(pattern_text: Optional[str]) -> str:
+    txt = str(pattern_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    return txt.strip("\n")
 
 
-def ornamental_fill(width: int, row: int = 0, phase: int = 0) -> str:
+@lru_cache(maxsize=32)
+def _compile_ornament_pattern(pattern_text: str) -> Tuple[Tuple[str, ...], int, int]:
+    txt = normalize_ornament_pattern_text(pattern_text) or normalize_ornament_pattern_text(ORNAMENT_PATTERN)
+    lines = tuple(txt.split("\n"))
+    pattern_h = max(1, len(lines))
+    pattern_w = max(1, max(len(ln) for ln in lines))
+    pattern_grid = tuple(ln.ljust(pattern_w) for ln in lines)
+    return pattern_grid, pattern_h, pattern_w
+
+
+def ornamental_fill(width: int, row: int = 0, phase: int = 0, pattern_text: Optional[str] = None) -> str:
     if width <= 0:
         return ""
+    pattern_grid, pattern_h, pattern_w = _compile_ornament_pattern(str(pattern_text or ""))
     # Tile the full ASCII-art block as a rectangle, not per-line lengths.
     # This keeps horizontal structure stable even when source lines vary in length.
-    y = row % PATTERN_H
-    line = PATTERN_GRID[y]
-    start = phase % PATTERN_W
+    y = row % pattern_h
+    line = pattern_grid[y]
+    start = phase % pattern_w
     base = line[start:] + line[:start]
-    return (base * ((width // PATTERN_W) + 2))[:width]
+    return (base * ((width // pattern_w) + 2))[:width]
 
 
 # ---------------------------------------------------------------------------

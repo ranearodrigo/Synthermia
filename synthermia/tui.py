@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import curses
+import curses.textpad
 import os
 import random
 import shutil
@@ -550,6 +551,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         "hide_piano": bool(saved.get("hide_piano", getattr(args, "hide_piano", False))),
         "no_color": bool(saved.get("no_color", args.no_color)),
         "no_offpiano_pattern": bool(saved.get("no_offpiano_pattern", args.no_offpiano_pattern)),
+        "offpiano_pattern": str(saved.get("offpiano_pattern", getattr(args, "offpiano_pattern", ""))),
         "pressed_key_color_mode": normalize_pressed_key_color_mode(
             str(saved.get("pressed_key_color_mode", getattr(args, "pressed_key_color_mode", "split")))
         ),
@@ -639,6 +641,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         {"key": "hide_piano", "label": "Hide Piano", "type": "bool", "section": "Visual"},
         {"key": "no_color", "label": "No Color", "type": "bool", "section": "Visual"},
         {"key": "no_offpiano_pattern", "label": "Hide Off-Piano Pattern", "type": "bool", "section": "Visual"},
+        {"key": "offpiano_pattern", "label": "Background Pattern", "type": "offpiano_pattern_editor", "section": "Visual"},
         {"key": "__export_mp3__", "label": "[ Export MP3 ]", "type": "button", "section": "Action"},
         {"key": "__ok__", "label": "[  OK  ]", "type": "button", "section": "Action"},
     ]
@@ -757,6 +760,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             "hide_piano": bool(state["hide_piano"]),
             "no_color": bool(state["no_color"]),
             "no_offpiano_pattern": bool(state["no_offpiano_pattern"]),
+            "offpiano_pattern": str(state["offpiano_pattern"]),
             "pressed_key_color_mode": normalize_pressed_key_color_mode(str(state["pressed_key_color_mode"])),
         }
 
@@ -1069,6 +1073,13 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                 f"P:{state['glyph_note_pedal_white']}/{state['glyph_note_pedal_black_left']}{state['glyph_note_pedal_black_mid']}{state['glyph_note_pedal_black_right']} "
                 f"K:{state['glyph_piano_white']}/{state['glyph_piano_black_left']}{state['glyph_piano_black_mid']}{state['glyph_piano_black_right']}"
             )
+        if t == "offpiano_pattern_editor":
+            txt = str(v or "")
+            if not txt.strip():
+                return "default"
+            lines = txt.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+            width = max((len(line) for line in lines), default=0)
+            return f"custom {len(lines)}x{width}"
         if t == "float":
             return f"{float(v):.2f}"
         return str(v)
@@ -1623,6 +1634,104 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                 if not filtered:
                     continue
                 return filtered[selected][0]
+
+    def edit_multiline_text(
+        stdscr: "curses._CursesWindow",
+        title: str,
+        initial_value: str,
+    ) -> Optional[str]:
+        h, w = stdscr.getmaxyx()
+        box_h = max(10, min(h - 2, 22))
+        box_w = max(40, min(w - 2, 100))
+        top = max(1, (h - box_h) // 2)
+        left = max(1, (w - box_w) // 2)
+        win = stdscr.derwin(box_h, box_w, top, left)
+        win.erase()
+        win.box()
+        win.addstr(0, max(2, (box_w - len(title)) // 2), title[: max(1, box_w - 4)], curses.A_BOLD)
+        help_line = "Paste/edit text. Ctrl-G saves, Esc cancels."
+        win.addstr(1, 2, help_line[: max(1, box_w - 4)])
+        edit_h = max(1, box_h - 4)
+        edit_w = max(1, box_w - 4)
+        edit_win = win.derwin(edit_h, edit_w, 2, 2)
+        edit_win.erase()
+        initial_lines = str(initial_value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        for row, line in enumerate(initial_lines[:edit_h]):
+            try:
+                edit_win.addstr(row, 0, line[:edit_w])
+            except Exception:
+                pass
+        edit_win.move(0, 0)
+
+        def validator(ch: int) -> int:
+            if ch == 27:
+                raise KeyboardInterrupt()
+            return ch
+
+        box = curses.textpad.Textbox(edit_win, insert_mode=True)
+        try:
+            curses.curs_set(1)
+            result = box.edit(validator)
+            return str(result).replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+        except KeyboardInterrupt:
+            return None
+        finally:
+            curses.curs_set(0)
+
+    def choose_offpiano_pattern(stdscr: "curses._CursesWindow", current_value: str) -> Optional[str]:
+        working = str(current_value or "")
+        status_msg = ""
+        while True:
+            stdscr.erase()
+            h, w = stdscr.getmaxyx()
+            stdscr.box()
+            title = " Background Pattern "
+            stdscr.addstr(0, max(2, (w - len(title)) // 2), title, curses.A_BOLD)
+            help_line = "e edit/paste  l load file  d default  s save  Esc cancel"
+            stdscr.addstr(1, 2, help_line[: max(1, w - 4)])
+            if status_msg:
+                stdscr.addstr(2, 2, status_msg[: max(1, w - 4)], curses.A_DIM)
+            lines = str(working or "").replace("\r\n", "\n").replace("\r", "\n").split("\n") if str(working or "") else []
+            if lines:
+                dims = f"Custom pattern: {len(lines)} line(s), max width {max(len(line) for line in lines)}"
+            else:
+                dims = "Using built-in default pattern."
+            stdscr.addstr(3, 2, dims[: max(1, w - 4)])
+            preview_top = 5
+            preview_h = max(1, h - preview_top - 2)
+            preview_lines = lines if lines else ["<built-in default pattern>"]
+            for row in range(min(preview_h, len(preview_lines))):
+                stdscr.addstr(preview_top + row, 2, preview_lines[row][: max(1, w - 4)])
+            stdscr.refresh()
+
+            k = stdscr.getch()
+            if k in (27, ord("q"), ord("Q")):
+                return None
+            if k in (ord("s"), ord("S"), 10, 13, curses.KEY_ENTER):
+                return working
+            if k in (ord("d"), ord("D"), ord("c"), ord("C")):
+                working = ""
+                status_msg = "Reverted to built-in default pattern."
+                continue
+            if k in (ord("l"), ord("L")):
+                typed = _edit_text_popup(stdscr, "Pattern File Path", "")
+                path_txt = str(typed).strip()
+                if not path_txt:
+                    status_msg = "No file selected."
+                    continue
+                try:
+                    with open(path_txt, "r", encoding="utf-8") as f:
+                        working = f.read().replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+                    status_msg = f"Loaded pattern from {path_txt}"
+                except Exception as exc:
+                    status_msg = f"Load failed: {exc}"
+                continue
+            if k in (ord("e"), ord("E")):
+                edited = edit_multiline_text(stdscr, " Pattern Text ", working)
+                if edited is not None:
+                    working = edited
+                    status_msg = "Updated custom pattern text."
+                continue
 
     def start_instrument_demo(option_text: str) -> Tuple[Optional[subprocess.Popen], Optional[str], Optional[str]]:
         soundfont = instrument_option_soundfont(option_text, str(state.get("soundfont", ""))).strip()
@@ -2477,6 +2586,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                 continue
 
     def apply_field_action(stdscr: "curses._CursesWindow", idx: int, direction: int) -> Optional[str]:
+        nonlocal profile_selection
         field = fields[idx]
         key = str(field["key"])
         t = str(field["type"])
@@ -2659,6 +2769,13 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             if direction != 0:
                 return None
             if choose_glyph_editor(stdscr):
+                persist_state()
+        elif t == "offpiano_pattern_editor":
+            if direction != 0:
+                return None
+            picked = choose_offpiano_pattern(stdscr, str(state.get(key, "")))
+            if picked is not None:
+                state[key] = picked
                 persist_state()
         elif t in {"int", "float"}:
             if direction != 0:
@@ -2944,6 +3061,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
     args.hide_piano = bool(state["hide_piano"])
     args.no_color = bool(state["no_color"])
     args.no_offpiano_pattern = bool(state["no_offpiano_pattern"])
+    args.offpiano_pattern = str(state["offpiano_pattern"])
     args.pressed_key_color_mode = normalize_pressed_key_color_mode(str(state["pressed_key_color_mode"]))
     return args
 

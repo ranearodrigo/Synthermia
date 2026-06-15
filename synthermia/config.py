@@ -467,6 +467,7 @@ def args_to_saved_config(args: argparse.Namespace, selected_midi: str) -> Dict[s
         "hide_piano": bool(getattr(args, "hide_piano", False)),
         "no_color": bool(args.no_color),
         "no_offpiano_pattern": bool(args.no_offpiano_pattern),
+        "offpiano_pattern": str(getattr(args, "offpiano_pattern", "")),
         "pressed_key_color_mode": normalize_pressed_key_color_mode(
             str(getattr(args, "pressed_key_color_mode", "split"))
         ),
