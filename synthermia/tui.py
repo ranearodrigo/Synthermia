@@ -1669,6 +1669,9 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             except Exception:
                 pass
         edit_win.move(0, 0)
+        win.refresh()
+        frame_win.refresh()
+        edit_win.refresh()
 
         def validator(ch: int) -> int:
             if ch == 27:
