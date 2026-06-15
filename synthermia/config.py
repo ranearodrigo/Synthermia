@@ -41,6 +41,8 @@ DEFAULT_VISUAL_GLYPHS: Dict[str, str] = {
     "glyph_piano_black_right": "▌",
 }
 
+PROFILES_FILE = ".synthermia_profiles.json"
+
 
 def _sanitize_visual_glyph(value: object, default: str) -> str:
     txt = str(value or "")
@@ -128,6 +130,43 @@ def save_last_config(cfg: Dict[str, object], path: str = CONFIG_FILE) -> None:
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2, sort_keys=True)
+    except Exception:
+        pass
+
+
+def load_config_profiles(path: str = PROFILES_FILE) -> List[Dict[str, object]]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return []
+        out: List[Dict[str, object]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            config = item.get("config", {})
+            if not name or not isinstance(config, dict):
+                continue
+            out.append({"name": name, "config": dict(config)})
+        return out
+    except Exception:
+        return []
+
+
+def save_config_profiles(profiles: Sequence[Dict[str, object]], path: str = PROFILES_FILE) -> None:
+    payload: List[Dict[str, object]] = []
+    for item in profiles:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        config = item.get("config", {})
+        if not name or not isinstance(config, dict):
+            continue
+        payload.append({"name": name, "config": dict(config)})
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
     except Exception:
         pass
 

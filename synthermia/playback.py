@@ -1145,8 +1145,9 @@ def playback(
                         stop_audio_only()
                     else:
                         sync_audio_to_time(play_t)
-                elif key in {"e", "E"} and paused:
+                elif key in {"e", "E"}:
                     resume_hint = float(play_t)
+                    paused = True
                     stop_audio_only()
                     args.start = resume_hint
                     save_last_config(args_to_saved_config(args, str(getattr(args, "midi", ""))))

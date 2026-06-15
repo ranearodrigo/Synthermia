@@ -37,12 +37,14 @@ from synthermia.config import (
     default_track_color,
     format_live_color_map,
     format_live_instrument_map,
+    load_config_profiles,
     load_last_config,
     normalize_pressed_key_color_mode,
     normalize_note_range_text,
     parse_live_color_map,
     parse_live_instrument_map,
     resolve_visual_glyphs,
+    save_config_profiles,
     save_last_config,
     scan_files_by_ext,
 )
@@ -329,6 +331,16 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
     from synthermia.playback import create_demo_midi_temp, make_instrument_preview_spans
 
     saved = load_last_config()
+    profile_entries = load_config_profiles()
+    saved_selected_profile = str(saved.get("selected_profile_name", "")).strip()
+    profile_selection = -1
+    if saved_selected_profile:
+        for idx, item in enumerate(profile_entries):
+            if str(item.get("name", "")).strip() == saved_selected_profile:
+                profile_selection = idx
+                break
+    if profile_selection < 0 and profile_entries:
+        profile_selection = 0
     saved_track_instruments = _normalize_saved_track_map(saved.get("track_instruments", {}))
     saved_track_colors = _normalize_saved_track_map(saved.get("track_colors", {}))
     saved_track_volumes = _normalize_saved_track_volume_map(
@@ -506,6 +518,10 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
     }
 
     fields: List[Dict[str, object]] = [
+        {"key": "profile_load", "label": "Load settings profile", "type": "profile_selector", "section": "Profile"},
+        {"key": "profile_save", "label": "Save this profile", "type": "profile_save_button", "section": "Profile"},
+        {"key": "profile_delete", "label": "Delete this profile", "type": "profile_delete_button", "section": "Profile"},
+        {"key": "profile_rename", "label": "Rename this profile", "type": "profile_rename_button", "section": "Profile"},
         {"key": "midi_input_mode", "label": "Live MIDI Input", "type": "bool", "section": "Input"},
         {"key": "midi_input_port", "label": "MIDI Input Port", "type": "text", "section": "Input"},
         {"key": "midi_input_save_dir", "label": "Live Save Dir", "type": "text", "section": "Input"},
@@ -589,93 +605,193 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         {"key": "__ok__", "label": "[  OK  ]", "type": "button", "section": "Action"},
     ]
 
-    def persist_state() -> None:
+    def profile_name_at(index: int) -> str:
+        if 0 <= index < len(profile_entries):
+            return str(profile_entries[index].get("name", "")).strip()
+        return ""
+
+    def unique_profile_name(base_name: str, skip_index: int = -1) -> str:
+        base = str(base_name or "").strip() or "Profile"
+        existing = {
+            str(item.get("name", "")).strip().lower()
+            for idx, item in enumerate(profile_entries)
+            if idx != skip_index
+        }
+        if base.lower() not in existing:
+            return base
+        suffix = 2
+        while True:
+            candidate = f"{base} {suffix}"
+            if candidate.lower() not in existing:
+                return candidate
+            suffix += 1
+
+    def next_default_profile_name() -> str:
+        n = 1
+        existing = {str(item.get("name", "")).strip().lower() for item in profile_entries}
+        while True:
+            candidate = f"Profile {n}"
+            if candidate.lower() not in existing:
+                return candidate
+            n += 1
+
+    def build_saved_config_snapshot() -> Dict[str, object]:
         clamp_playback_fields()
         inst_bank, inst_prog = parse_instrument_pair(str(state["instrument"]))
-        save_last_config(
-            {
-                "midi_input_mode": bool(state["midi_input_mode"]),
-                "midi_input_port": str(state["midi_input_port"]),
-                "midi_input_save_dir": str(state["midi_input_save_dir"]),
-                "midi_input_invert_pedal": bool(state["midi_input_invert_pedal"]),
-                "midi_input_instrument_map": str(state["midi_input_instrument_map"]),
-                "midi_input_color_map": str(state["midi_input_color_map"]),
-                "midi": str(state["midi"]),
-                "soundfont": str(state["soundfont"]),
-                "soundfonts": list(_normalize_saved_soundfont_library(state.get("soundfonts", []))),
-                "instrument": str(state["instrument"]),
-                "instrument_bank": inst_bank,
-                "instrument_program": inst_prog,
-                "track_instruments": dict(state["track_instruments"]),
-                "track_colors": dict(state["track_colors"]),
-                "track_volumes": dict(state["track_volumes"]),
-                "audio_engine": str(state["audio_engine"]),
-                "playback_engine": str(state["playback_engine"]),
-                "fluidsynth_bin": str(state["fluidsynth_bin"]),
-                "audio_driver": str(state["audio_driver"]),
-                "audio_output": str(state["audio_output"]),
-                "audio_gain": float(state["audio_gain"]),
-                "audio_period_size": int(state["audio_period_size"]),
-                "audio_periods": int(state["audio_periods"]),
-                "audio_samplerate": int(state["audio_samplerate"]),
-                "fps": int(state["fps"]),
-                "rows": int(state["rows"]),
-                "x_scale": int(state["x_scale"]),
-                "kb_y_scale": int(state["kb_y_scale"]),
-                "kb_black_extra": int(state["kb_black_extra"]),
-                "dynamics_full_velocity": float(state["dynamics_full_velocity"]),
-                "terminal_bg_color": str(state["terminal_bg_color"]).strip(),
-                "glyph_note_white": _sanitize_visual_glyph(state["glyph_note_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_white"]),
-                "glyph_note_pedal_white": _sanitize_visual_glyph(
-                    state["glyph_note_pedal_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_white"]
-                ),
-                "glyph_note_pedal_black_left": _sanitize_visual_glyph(
-                    state["glyph_note_pedal_black_left"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_black_left"]
-                ),
-                "glyph_note_pedal_black_mid": _sanitize_visual_glyph(
-                    state["glyph_note_pedal_black_mid"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_black_mid"]
-                ),
-                "glyph_note_pedal_black_right": _sanitize_visual_glyph(
-                    state["glyph_note_pedal_black_right"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_black_right"]
-                ),
-                "glyph_note_black_left": _sanitize_visual_glyph(
-                    state["glyph_note_black_left"], DEFAULT_VISUAL_GLYPHS["glyph_note_black_left"]
-                ),
-                "glyph_note_black_mid": _sanitize_visual_glyph(
-                    state["glyph_note_black_mid"], DEFAULT_VISUAL_GLYPHS["glyph_note_black_mid"]
-                ),
-                "glyph_note_black_right": _sanitize_visual_glyph(
-                    state["glyph_note_black_right"], DEFAULT_VISUAL_GLYPHS["glyph_note_black_right"]
-                ),
-                "glyph_piano_white": _sanitize_visual_glyph(
-                    state["glyph_piano_white"], DEFAULT_VISUAL_GLYPHS["glyph_piano_white"]
-                ),
-                "glyph_piano_black_left": _sanitize_visual_glyph(
-                    state["glyph_piano_black_left"], DEFAULT_VISUAL_GLYPHS["glyph_piano_black_left"]
-                ),
-                "glyph_piano_black_mid": _sanitize_visual_glyph(
-                    state["glyph_piano_black_mid"], DEFAULT_VISUAL_GLYPHS["glyph_piano_black_mid"]
-                ),
-                "glyph_piano_black_right": _sanitize_visual_glyph(
-                    state["glyph_piano_black_right"], DEFAULT_VISUAL_GLYPHS["glyph_piano_black_right"]
-                ),
-                "pedal_visual_dots": bool(state["pedal_visual_dots"]),
-                "disable_pedal": bool(state["disable_pedal"]),
-                "pedal_opacity_scale": max(0.0, min(1.0, float(state["pedal_opacity_scale"]))),
-                "pedal_decay_seconds": max(0.0, float(state["pedal_decay_seconds"])),
-                "measure_bars": bool(state["measure_bars"]),
-                "drop_speed": float(state["drop_speed"]),
-                "speed": float(state["speed"]),
-                "midi_flip": bool(state["midi_flip"]),
-                "stuck_note_fix": normalize_stuck_note_fix_mode(str(state["stuck_note_fix"])),
-                "start": float(state["start"]),
-                "range": str(state["range"]),
-                "hide_piano": bool(state["hide_piano"]),
-                "no_color": bool(state["no_color"]),
-                "no_offpiano_pattern": bool(state["no_offpiano_pattern"]),
-                "pressed_key_color_mode": normalize_pressed_key_color_mode(str(state["pressed_key_color_mode"])),
-            }
-        )
+        return {
+            "selected_profile_name": profile_name_at(profile_selection),
+            "midi_input_mode": bool(state["midi_input_mode"]),
+            "midi_input_port": str(state["midi_input_port"]),
+            "midi_input_save_dir": str(state["midi_input_save_dir"]),
+            "midi_input_invert_pedal": bool(state["midi_input_invert_pedal"]),
+            "midi_input_instrument_map": str(state["midi_input_instrument_map"]),
+            "midi_input_color_map": str(state["midi_input_color_map"]),
+            "midi": str(state["midi"]),
+            "soundfont": str(state["soundfont"]),
+            "soundfonts": list(_normalize_saved_soundfont_library(state.get("soundfonts", []))),
+            "instrument": str(state["instrument"]),
+            "instrument_bank": inst_bank,
+            "instrument_program": inst_prog,
+            "track_instruments": dict(state["track_instruments"]),
+            "track_colors": dict(state["track_colors"]),
+            "track_volumes": dict(state["track_volumes"]),
+            "audio_engine": str(state["audio_engine"]),
+            "playback_engine": str(state["playback_engine"]),
+            "fluidsynth_bin": str(state["fluidsynth_bin"]),
+            "audio_driver": str(state["audio_driver"]),
+            "audio_output": str(state["audio_output"]),
+            "audio_gain": float(state["audio_gain"]),
+            "audio_period_size": int(state["audio_period_size"]),
+            "audio_periods": int(state["audio_periods"]),
+            "audio_samplerate": int(state["audio_samplerate"]),
+            "fps": int(state["fps"]),
+            "rows": int(state["rows"]),
+            "x_scale": int(state["x_scale"]),
+            "kb_y_scale": int(state["kb_y_scale"]),
+            "kb_black_extra": int(state["kb_black_extra"]),
+            "dynamics_full_velocity": float(state["dynamics_full_velocity"]),
+            "terminal_bg_color": str(state["terminal_bg_color"]).strip(),
+            "glyph_note_white": _sanitize_visual_glyph(state["glyph_note_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_white"]),
+            "glyph_note_pedal_white": _sanitize_visual_glyph(
+                state["glyph_note_pedal_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_white"]
+            ),
+            "glyph_note_pedal_black_left": _sanitize_visual_glyph(
+                state["glyph_note_pedal_black_left"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_black_left"]
+            ),
+            "glyph_note_pedal_black_mid": _sanitize_visual_glyph(
+                state["glyph_note_pedal_black_mid"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_black_mid"]
+            ),
+            "glyph_note_pedal_black_right": _sanitize_visual_glyph(
+                state["glyph_note_pedal_black_right"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_black_right"]
+            ),
+            "glyph_note_black_left": _sanitize_visual_glyph(
+                state["glyph_note_black_left"], DEFAULT_VISUAL_GLYPHS["glyph_note_black_left"]
+            ),
+            "glyph_note_black_mid": _sanitize_visual_glyph(
+                state["glyph_note_black_mid"], DEFAULT_VISUAL_GLYPHS["glyph_note_black_mid"]
+            ),
+            "glyph_note_black_right": _sanitize_visual_glyph(
+                state["glyph_note_black_right"], DEFAULT_VISUAL_GLYPHS["glyph_note_black_right"]
+            ),
+            "glyph_piano_white": _sanitize_visual_glyph(
+                state["glyph_piano_white"], DEFAULT_VISUAL_GLYPHS["glyph_piano_white"]
+            ),
+            "glyph_piano_black_left": _sanitize_visual_glyph(
+                state["glyph_piano_black_left"], DEFAULT_VISUAL_GLYPHS["glyph_piano_black_left"]
+            ),
+            "glyph_piano_black_mid": _sanitize_visual_glyph(
+                state["glyph_piano_black_mid"], DEFAULT_VISUAL_GLYPHS["glyph_piano_black_mid"]
+            ),
+            "glyph_piano_black_right": _sanitize_visual_glyph(
+                state["glyph_piano_black_right"], DEFAULT_VISUAL_GLYPHS["glyph_piano_black_right"]
+            ),
+            "pedal_visual_dots": bool(state["pedal_visual_dots"]),
+            "disable_pedal": bool(state["disable_pedal"]),
+            "pedal_opacity_scale": max(0.0, min(1.0, float(state["pedal_opacity_scale"]))),
+            "pedal_decay_seconds": max(0.0, float(state["pedal_decay_seconds"])),
+            "measure_bars": bool(state["measure_bars"]),
+            "drop_speed": float(state["drop_speed"]),
+            "speed": float(state["speed"]),
+            "midi_flip": bool(state["midi_flip"]),
+            "stuck_note_fix": normalize_stuck_note_fix_mode(str(state["stuck_note_fix"])),
+            "start": float(state["start"]),
+            "range": str(state["range"]),
+            "hide_piano": bool(state["hide_piano"]),
+            "no_color": bool(state["no_color"]),
+            "no_offpiano_pattern": bool(state["no_offpiano_pattern"]),
+            "pressed_key_color_mode": normalize_pressed_key_color_mode(str(state["pressed_key_color_mode"])),
+        }
+
+    def persist_state() -> None:
+        save_last_config(build_saved_config_snapshot())
+
+    def apply_saved_config_snapshot(snapshot: Dict[str, object]) -> None:
+        nonlocal profile_selection
+        if not isinstance(snapshot, dict):
+            return
+        for key in list(state.keys()):
+            if key in snapshot:
+                state[key] = snapshot[key]
+        state["track_instruments"] = dict(_normalize_saved_track_map(state.get("track_instruments", {})))
+        state["track_colors"] = dict(_normalize_saved_track_map(state.get("track_colors", {})))
+        state["track_volumes"] = dict(_normalize_saved_track_volume_map(state.get("track_volumes", {})))
+        invalidate_track_analysis()
+        invalidate_instrument_options()
+        refresh_midi_duration()
+        selected_name = str(snapshot.get("selected_profile_name", "")).strip()
+        if selected_name:
+            for idx, item in enumerate(profile_entries):
+                if str(item.get("name", "")).strip() == selected_name:
+                    profile_selection = idx
+                    break
+
+    def choose_profile_name(stdscr: "curses._CursesWindow", current_index: int) -> Optional[int]:
+        selected = max(0, min(current_index, max(0, len(profile_entries) - 1)))
+        offset = 0
+        while True:
+            stdscr.erase()
+            h, w = stdscr.getmaxyx()
+            stdscr.box()
+            title = " Profile Picker "
+            stdscr.addstr(0, max(2, (w - len(title)) // 2), title, curses.A_BOLD)
+            help_line = "Up/Down move  Enter select  PgUp/PgDn page  Esc cancel"
+            stdscr.addstr(2, 2, help_line[: max(1, w - 4)])
+            top = 4
+            list_h = max(1, h - top - 2)
+            if not profile_entries:
+                stdscr.addstr(top, 2, "(no saved profiles)"[: max(1, w - 4)], curses.A_DIM)
+            else:
+                if selected < offset:
+                    offset = selected
+                if selected >= offset + list_h:
+                    offset = selected - list_h + 1
+                for row in range(list_h):
+                    idx = offset + row
+                    if idx >= len(profile_entries):
+                        break
+                    name = str(profile_entries[idx].get("name", "")).strip() or f"Profile {idx + 1}"
+                    attr = curses.A_REVERSE if idx == selected else curses.A_NORMAL
+                    stdscr.addstr(top + row, 2, name[: max(1, w - 4)], attr)
+            stdscr.refresh()
+            k = stdscr.getch()
+            if k in (27, ord("q"), ord("Q")):
+                return None
+            if k == curses.KEY_UP and profile_entries:
+                selected = (selected - 1) % len(profile_entries)
+                continue
+            if k == curses.KEY_DOWN and profile_entries:
+                selected = (selected + 1) % len(profile_entries)
+                continue
+            if k == curses.KEY_PPAGE:
+                selected = max(0, selected - list_h)
+                continue
+            if k == curses.KEY_NPAGE:
+                selected = min(max(0, len(profile_entries) - 1), selected + list_h)
+                continue
+            if k in (10, 13, curses.KEY_ENTER):
+                if not profile_entries:
+                    return None
+                return selected
 
     track_entries: List[MidiTrackSummary] = []
     midi_duration_sec = 0.0
@@ -861,6 +977,12 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         t = str(field["type"])
         if t == "button":
             return ""
+        if t == "profile_selector":
+            if not profile_entries:
+                return "<none>"
+            return _fmt_choice(profile_name_at(profile_selection) or f"Profile {profile_selection + 1}")
+        if t in {"profile_save_button", "profile_delete_button", "profile_rename_button"}:
+            return ""
         v = state[k]
         if t == "bool":
             return "ON" if bool(v) else "OFF"
@@ -923,6 +1045,20 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         else:
             idx = options.index(cur)
         state[key] = options[(idx + delta) % len(options)]
+
+    def cycle_profile(delta: int) -> None:
+        nonlocal profile_selection
+        if not profile_entries:
+            profile_selection = -1
+            return
+        if profile_selection < 0 or profile_selection >= len(profile_entries):
+            profile_selection = 0
+        else:
+            profile_selection = (profile_selection + delta) % len(profile_entries)
+        snapshot = profile_entries[profile_selection].get("config", {})
+        if isinstance(snapshot, dict):
+            apply_saved_config_snapshot(dict(snapshot))
+        persist_state()
 
     def nudge_numeric(field: Dict[str, object], delta: int) -> None:
         key = str(field["key"])
@@ -2327,6 +2463,69 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                     _message_popup(stdscr, " Export Failed ", str(exc))
                 return None
             return "ok"
+        if t == "profile_selector":
+            if direction != 0:
+                cycle_profile(direction)
+                return None
+            picked_idx = choose_profile_name(stdscr, profile_selection if profile_selection >= 0 else 0)
+            if picked_idx is None:
+                return None
+            profile_selection = picked_idx
+            snapshot = profile_entries[picked_idx].get("config", {})
+            if isinstance(snapshot, dict):
+                apply_saved_config_snapshot(dict(snapshot))
+                persist_state()
+            return None
+        if t == "profile_save_button":
+            if direction != 0:
+                return None
+            if 0 <= profile_selection < len(profile_entries):
+                snapshot = build_saved_config_snapshot()
+                profile_entries[profile_selection]["config"] = dict(snapshot)
+            else:
+                new_name = next_default_profile_name()
+                profile_entries.append(
+                    {
+                        "name": new_name,
+                        "config": {},
+                    }
+                )
+                profile_selection = len(profile_entries) - 1
+                snapshot = build_saved_config_snapshot()
+                profile_entries[profile_selection]["config"] = dict(snapshot)
+            save_config_profiles(profile_entries)
+            persist_state()
+            return None
+        if t == "profile_delete_button":
+            if direction != 0:
+                return None
+            if not (0 <= profile_selection < len(profile_entries)):
+                return None
+            profile_entries.pop(profile_selection)
+            if not profile_entries:
+                profile_selection = -1
+            else:
+                profile_selection = min(profile_selection, len(profile_entries) - 1)
+            save_config_profiles(profile_entries)
+            persist_state()
+            return None
+        if t == "profile_rename_button":
+            if direction != 0:
+                return None
+            if not (0 <= profile_selection < len(profile_entries)):
+                return None
+            current_name = profile_name_at(profile_selection)
+            typed = _edit_text_popup(stdscr, "Profile Name", current_name)
+            new_name = str(typed).strip()
+            if not new_name:
+                return None
+            profile_entries[profile_selection]["name"] = unique_profile_name(new_name, skip_index=profile_selection)
+            snapshot = profile_entries[profile_selection].get("config", {})
+            if isinstance(snapshot, dict):
+                snapshot["selected_profile_name"] = profile_entries[profile_selection]["name"]
+            save_config_profiles(profile_entries)
+            persist_state()
+            return None
         if t == "bool":
             state[key] = not bool(state[key])
             persist_state()
@@ -2450,11 +2649,14 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             section_fields[section].append(field_idx)
         items: List[Dict[str, object]] = []
         for section in section_order:
+            count = len(section_fields[section])
+            if section == "Profile":
+                count = len(profile_entries)
             items.append(
                 {
                     "kind": "section",
                     "section": section,
-                    "count": len(section_fields[section]),
+                    "count": count,
                 }
             )
             if section in collapsed_sections:
