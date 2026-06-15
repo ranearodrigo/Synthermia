@@ -106,6 +106,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--audio-period-size", type=int, default=512, help="FluidSynth audio period size (buffer), e.g. 512")
     p.add_argument("--audio-periods", type=int, default=3, help="FluidSynth audio periods, e.g. 3")
     p.add_argument("--audio-samplerate", type=int, default=48000, help="FluidSynth sample rate, e.g. 48000")
+    p.add_argument("--audio-polyphony", type=int, default=2048, help="FluidSynth max active voices (default: 2048)")
     p.add_argument("--instrument-bank", type=int, default=0, help="SoundFont bank number for playback (default: 0)")
     p.add_argument("--instrument-program", type=int, default=0, help="SoundFont program number for playback (default: 0)")
     p.add_argument("--audio-log", type=str, default="", help="Append FluidSynth stdout/stderr to this file")

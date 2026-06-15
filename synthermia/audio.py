@@ -423,6 +423,7 @@ class RealtimeFluidSynthPlayer:
         samplerate: int = 0,
         period_size: int = 0,
         periods: int = 0,
+        polyphony: int = 0,
         channel_programs: Optional[Dict[int, Tuple[int, int]]] = None,
         channel_soundfonts: Optional[Dict[int, str]] = None,
         control_events: Optional[Sequence[ControlEvent]] = None,
@@ -456,6 +457,7 @@ class RealtimeFluidSynthPlayer:
         effective_period_size = int(period_size) if int(period_size) > 0 else 512
         effective_periods = int(periods) if int(periods) > 0 else 3
         effective_samplerate = int(samplerate) if int(samplerate) > 0 else 0
+        effective_polyphony = int(polyphony) if int(polyphony) > 0 else 0
         output_target_txt = _resolve_audio_output_target(output_target)
 
         requested = str(driver).strip()
@@ -485,6 +487,11 @@ class RealtimeFluidSynthPlayer:
                     if effective_samplerate > 0:
                         try:
                             synth.setting("synth.sample-rate", float(effective_samplerate))
+                        except Exception:
+                            pass
+                    if effective_polyphony > 0:
+                        try:
+                            synth.setting("synth.polyphony", int(effective_polyphony))
                         except Exception:
                             pass
                     if output_target_txt:
@@ -997,6 +1004,8 @@ def launch_soundfont_playback(args: argparse.Namespace) -> Tuple[Optional[subpro
         cmd.extend(["-o", f"audio.periods={int(args.audio_periods)}"])
     if args.audio_samplerate:
         cmd.extend(["-o", f"synth.sample-rate={int(args.audio_samplerate)}"])
+    if int(getattr(args, "audio_polyphony", 0) or 0) > 0:
+        cmd.extend(["-o", f"synth.polyphony={int(getattr(args, 'audio_polyphony', 0))}"])
     cmd.extend([args.soundfont, midi_path])
     log_path = str(getattr(args, "audio_log", "") or "")
     log_fh: Optional[IO[str]] = None

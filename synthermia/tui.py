@@ -460,6 +460,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         "audio_period_size": int(saved.get("audio_period_size", args.audio_period_size)),
         "audio_periods": int(saved.get("audio_periods", args.audio_periods)),
         "audio_samplerate": int(saved.get("audio_samplerate", args.audio_samplerate)),
+        "audio_polyphony": int(saved.get("audio_polyphony", getattr(args, "audio_polyphony", 2048))),
         "instrument": saved_instr_text if saved_instr_text.strip() else format_instrument_option(saved_instr_bank, saved_instr_prog),
         "track_instruments": dict(saved_track_instruments),
         "track_colors": dict(saved_track_colors),
@@ -611,6 +612,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         {"key": "audio_period_size", "label": "Audio Period Size", "type": "int", "step": 64, "min": 0, "section": "Audio"},
         {"key": "audio_periods", "label": "Audio Periods", "type": "int", "step": 1, "min": 0, "section": "Audio"},
         {"key": "audio_samplerate", "label": "Audio Samplerate", "type": "int", "step": 1000, "min": 0, "section": "Audio"},
+        {"key": "audio_polyphony", "label": "Audio Polyphony", "type": "int", "step": 256, "min": 0, "section": "Audio"},
         {"key": "playback_engine", "label": "Playback Engine", "type": "choice", "options": ["auto", "python", "packed"], "section": "Playback"},
         {"key": "fps", "label": "FPS", "type": "int", "step": 1, "min": 1, "section": "Playback"},
         {"key": "rows", "label": "Rows", "type": "int", "step": 1, "min": 4, "section": "Playback"},
@@ -732,6 +734,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             "audio_period_size": int(state["audio_period_size"]),
             "audio_periods": int(state["audio_periods"]),
             "audio_samplerate": int(state["audio_samplerate"]),
+            "audio_polyphony": int(state["audio_polyphony"]),
             "fps": int(state["fps"]),
             "rows": int(state["rows"]),
             "x_scale": int(state["x_scale"]),
@@ -1806,12 +1809,15 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         period_size = int(state.get("audio_period_size", 0))
         periods = int(state.get("audio_periods", 0))
         samplerate = int(state.get("audio_samplerate", 0))
+        polyphony = int(state.get("audio_polyphony", 0))
         if period_size > 0:
             cmd.extend(["-o", f"audio.period-size={period_size}"])
         if periods > 0:
             cmd.extend(["-o", f"audio.periods={periods}"])
         if samplerate > 0:
             cmd.extend(["-o", f"synth.sample-rate={samplerate}"])
+        if polyphony > 0:
+            cmd.extend(["-o", f"synth.polyphony={polyphony}"])
         cmd.extend([soundfont, temp_midi])
 
         env = _fluidsynth_env(driver, str(state.get("audio_output", "")))
@@ -1906,6 +1912,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             samplerate = int(state.get("audio_samplerate", 0) or 0)
             period_size = int(state.get("audio_period_size", 0) or 0)
             periods = int(state.get("audio_periods", 0) or 0)
+            polyphony = int(state.get("audio_polyphony", 0) or 0)
             try:
                 with _suppress_stderr_fd():
                     if demo_player is None:
@@ -1918,6 +1925,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                             samplerate=samplerate,
                             period_size=period_size,
                             periods=periods,
+                            polyphony=polyphony,
                             channel_programs={0: pair},
                             control_events=[],
                         )
@@ -2654,6 +2662,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                     export_args.fluidsynth_bin = str(state["fluidsynth_bin"])
                     export_args.audio_gain = float(state["audio_gain"])
                     export_args.audio_samplerate = int(state["audio_samplerate"])
+                    export_args.audio_polyphony = int(state["audio_polyphony"])
                     export_args.instrument_bank, export_args.instrument_program = parse_instrument_pair(str(state["instrument"]))
                     export_args.track_instruments = dict(state["track_instruments"])
                     export_args.track_volumes = dict(state["track_volumes"])
@@ -3051,6 +3060,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
     args.audio_period_size = int(state["audio_period_size"])
     args.audio_periods = int(state["audio_periods"])
     args.audio_samplerate = int(state["audio_samplerate"])
+    args.audio_polyphony = int(state["audio_polyphony"])
     args.instrument = str(state["instrument"])
     args.instrument_bank, args.instrument_program = parse_instrument_pair(str(state["instrument"]))
     args.track_instruments = dict(state["track_instruments"])
@@ -3251,6 +3261,8 @@ def export_configured_midi_to_mp3(
             ]
             if int(getattr(args, "audio_samplerate", 0) or 0) > 0:
                 fs_cmd.extend(["-r", str(int(getattr(args, "audio_samplerate", 0)))])
+            if int(getattr(args, "audio_polyphony", 0) or 0) > 0:
+                fs_cmd.extend(["-o", f"synth.polyphony={int(getattr(args, 'audio_polyphony', 0))}"])
             fs_cmd.extend([stem_sf, stem_midi])
             fs_run = subprocess.Popen(
                 fs_cmd,

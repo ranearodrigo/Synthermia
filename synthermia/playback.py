@@ -920,6 +920,7 @@ def playback(
                         samplerate=int(getattr(args, "audio_samplerate", 0) or 0),
                         period_size=int(getattr(args, "audio_period_size", 0) or 0),
                         periods=int(getattr(args, "audio_periods", 0) or 0),
+                        polyphony=int(getattr(args, "audio_polyphony", 0) or 0),
                         channel_programs=channel_programs,
                         channel_soundfonts=channel_soundfonts,
                         control_events=audio_controls,
@@ -1505,6 +1506,7 @@ def playback_live_midi_input(args: argparse.Namespace) -> None:
                 samplerate=int(getattr(args, "audio_samplerate", 0) or 0),
                 period_size=int(getattr(args, "audio_period_size", 0) or 0),
                 periods=int(getattr(args, "audio_periods", 0) or 0),
+                polyphony=int(getattr(args, "audio_polyphony", 0) or 0),
                 channel_programs=programs,
                 control_events=[],
             )

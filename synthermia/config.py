@@ -398,6 +398,7 @@ def args_to_saved_config(args: argparse.Namespace, selected_midi: str) -> Dict[s
         "audio_period_size": args.audio_period_size,
         "audio_periods": args.audio_periods,
         "audio_samplerate": args.audio_samplerate,
+        "audio_polyphony": int(getattr(args, "audio_polyphony", 2048)),
         "fps": args.fps,
         "rows": args.rows,
         "x_scale": args.x_scale,
