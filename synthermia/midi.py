@@ -270,12 +270,12 @@ def parse_midi_track_summaries(path: str) -> List[MidiTrackSummary]:
                 payload = data[i : i + length]
                 i += length
                 if meta_type == 0x03 and not name_seen:
-                    name_txt = payload.decode("latin1", errors="ignore").strip()
+                    name_txt = _clean_midi_text(payload)
                     if name_txt:
                         track_name = name_txt
                         name_seen = True
                 elif meta_type == 0x04 and not instrument_seen:
-                    inst_txt = payload.decode("latin1", errors="ignore").strip()
+                    inst_txt = _clean_midi_text(payload)
                     if inst_txt:
                         instrument_name = inst_txt
                         instrument_seen = True
@@ -307,6 +307,11 @@ def parse_midi_track_summaries(path: str) -> List[MidiTrackSummary]:
             )
         )
     return summaries
+
+
+def _clean_midi_text(payload: bytes) -> str:
+    """Remove MIDI text padding that terminal drawing APIs cannot render."""
+    return payload.decode("latin1", errors="ignore").replace("\x00", "").strip()
 
 
 def build_tempo_segments(
@@ -371,6 +376,8 @@ def build_note_spans(
     events: Sequence[RawEvent],
     ticks_per_qn: int,
     stuck_note_fix_mode: str = "off",
+    long_note_threshold: float = 0.0,
+    long_note_duration: float = 0.0,
     diagnostics: Optional[Dict[str, int]] = None,
 ) -> List[NoteSpan]:
     tempo_segments = build_tempo_segments(events, ticks_per_qn)
@@ -389,6 +396,10 @@ def build_note_spans(
     spans: List[NoteSpan] = []
     overlap_fixes = 0
     orphan_note_offs = 0
+    long_note_trims = 0
+    threshold = max(0.0, float(long_note_threshold))
+    trimmed_duration = max(0.0, float(long_note_duration))
+    trim_long_notes = threshold > 0.0 and trimmed_duration > 0.0
 
     for ev in events:
         if ev.kind == "note_on" and ev.note is not None and ev.channel is not None and ev.velocity is not None:
@@ -409,11 +420,18 @@ def build_note_spans(
                 start_tick, vel = q.popleft()
             if ev.tick <= start_tick:
                 continue
+            start_sec = tick_sec(start_tick)
+            end_sec = tick_sec(ev.tick)
+            if trim_long_notes and (end_sec - start_sec) > threshold:
+                capped_end = min(end_sec, start_sec + trimmed_duration)
+                if capped_end < end_sec:
+                    end_sec = capped_end
+                    long_note_trims += 1
             spans.append(
                 NoteSpan(
                     note=ev.note,
-                    start=tick_sec(start_tick),
-                    end=tick_sec(ev.tick),
+                    start=start_sec,
+                    end=end_sec,
                     velocity=vel,
                     channel=ev.channel,
                     track=track_idx,
@@ -424,6 +442,7 @@ def build_note_spans(
         diagnostics["stuck_note_fix_mode"] = 0 if mode == "off" else (1 if mode == "auto" else 2)
         diagnostics["overlap_fixes"] = int(overlap_fixes)
         diagnostics["orphan_note_offs"] = int(orphan_note_offs)
+        diagnostics["long_note_trims"] = int(long_note_trims)
         diagnostics["remaining_unmatched_note_ons"] = int(sum(len(v) for v in on_map.values()))
 
     spans.sort(key=lambda s: s.start)
@@ -498,6 +517,8 @@ def load_playback_source(
     stuck_note_fix_mode: str = "off",
     midi_flip: bool = False,
     flip_bounds: Optional[Tuple[int, int]] = None,
+    long_note_threshold: float = 0.0,
+    long_note_duration: float = 0.0,
 ) -> Tuple[List[NoteSpan], List[ControlEvent], List[float], Dict[str, int]]:
     header, events = parse_midi(midi_path)
     note_diag: Dict[str, int] = {}
@@ -505,6 +526,8 @@ def load_playback_source(
         events,
         header.division,
         stuck_note_fix_mode=stuck_note_fix_mode,
+        long_note_threshold=long_note_threshold,
+        long_note_duration=long_note_duration,
         diagnostics=note_diag,
     )
     if midi_flip:

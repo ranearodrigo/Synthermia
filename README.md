@@ -30,12 +30,21 @@ Optional (native packed playback acceleration for very large MIDIs):
 - Rust toolchain
 - `maturin` for local extension builds
 
+Optional (desktop/headphone media controls):
+- System DBus Python bindings (`python3-dbus` and `python3-gi` on many Linux distributions)
+
 ## Quick Start
 
 Launch the interactive TUI config screen (pick MIDI, SoundFont, and settings):
 
 ```bash
 python3 main.py
+```
+
+When using the project's `uv` environment through `mise`:
+
+```bash
+mise x -- uv run main.py
 ```
 
 Or launch directly with a MIDI file:
@@ -73,6 +82,7 @@ Settings are persisted to `.synthermia_last_config.json` and restored on next la
 - Terminal piano-roll rendering with Unicode glyphs
 - Multi-track parsing with tempo map, time signatures, controls, and note span generation
 - Stuck-note mitigation modes (`auto`, `off`, `lifo`) for imperfect MIDI files
+- Optional long-note cleanup that caps malformed note durations without extending ordinary notes
 - Optional measure bars in playfield
 - Pedal visualization (dotted hold tails) with independent pedal opacity scaling and configurable fade decay
 - Velocity-based note transparency (dynamics visualization)
@@ -86,6 +96,7 @@ Settings are persisted to `.synthermia_last_config.json` and restored on next la
 - Audio backend settings (driver, output device, gain, period size, periods, sample rate)
 - Optional audio logging with timestamps (`--audio-log`)
 - Runtime playback controls: pause, seek, volume adjust, settings, quit
+- Optional desktop/headphone media controls through MPRIS: pause, seek, and volume
 - MIDI pitch mirror (`--midi-flip`) for reversing note layout
 - Live MIDI input mode (USB/ALSA) with upward-moving notes
 - Live sustain pedal handling (including invert option)
@@ -102,6 +113,8 @@ Standard playback:
 - `Up` / `Down`: audio gain
 - `q`: quit
 
+When the optional DBus bindings are installed, desktop/headphone media controls provide the same pause, seek, and volume actions.
+
 Live input mode:
 - `s`: save captured MIDI
 - `Up` / `Down`: audio gain
@@ -114,7 +127,7 @@ Use `python3 main.py -h` for full options. Main groups:
 
 - **Input**: MIDI file path, live MIDI mode + port + save dir + pedal invert + live mapping strings
 - **Audio**: engine, FluidSynth binary, driver, output device (`--audio-output`), gain, period size/periods/sample rate, SoundFont (`--soundfont`), SoundFont library (`--soundfonts`), bank/program
-- **Playback**: fps, rows, drop speed, speed, start, range, stuck-note-fix, midi-flip, playback-engine
+- **Playback**: fps, rows, drop speed, speed, start, range, stuck-note-fix, long-note threshold/duration, midi-flip, playback-engine
 - **Visual**: glyphs, dynamics threshold, pedal dots/opacity/decay, measure bars, keyboard scale, piano visibility, colors, terminal background, ascii-ui
 
 ## Optional Native Acceleration

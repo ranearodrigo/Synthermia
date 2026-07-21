@@ -574,6 +574,8 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         "stuck_note_fix": normalize_stuck_note_fix_mode(
             str(saved.get("stuck_note_fix", getattr(args, "stuck_note_fix", "auto")))
         ),
+        "long_note_threshold": float(saved.get("long_note_threshold", getattr(args, "long_note_threshold", 0.0))),
+        "long_note_duration": float(saved.get("long_note_duration", getattr(args, "long_note_duration", 10.0))),
         "start": float(saved.get("start", args.start)),
         "range": normalize_note_range_text(str(saved.get("range", args.range))),
         "hide_piano": bool(saved.get("hide_piano", getattr(args, "hide_piano", False))),
@@ -624,6 +626,22 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             "label": "Stuck Note Fix",
             "type": "choice",
             "options": ["auto", "off", "lifo"],
+            "section": "Playback",
+        },
+        {
+            "key": "long_note_threshold",
+            "label": "Long Note Threshold (s; 0=Off)",
+            "type": "float",
+            "step": 1.0,
+            "min": 0.0,
+            "section": "Playback",
+        },
+        {
+            "key": "long_note_duration",
+            "label": "Long Note Trim To (s)",
+            "type": "float",
+            "step": 1.0,
+            "min": 0.0,
             "section": "Playback",
         },
         {"key": "start", "label": "Start Time (s)", "type": "float", "step": 0.5, "min": 0.0, "section": "Playback"},
@@ -785,6 +803,8 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             "speed": float(state["speed"]),
             "midi_flip": bool(state["midi_flip"]),
             "stuck_note_fix": normalize_stuck_note_fix_mode(str(state["stuck_note_fix"])),
+            "long_note_threshold": max(0.0, float(state["long_note_threshold"])),
+            "long_note_duration": max(0.0, float(state["long_note_duration"])),
             "start": float(state["start"]),
             "range": str(state["range"]),
             "hide_piano": bool(state["hide_piano"]),
@@ -870,6 +890,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
     track_entries_loaded = False
     midi_duration_known = False
     instrument_options_loaded = False
+    instrument_options_signature: Tuple[Tuple[str, int, int, int], ...] = ()
 
     def invalidate_track_analysis() -> None:
         nonlocal track_entries, midi_duration_sec, track_entries_loaded, midi_duration_known
@@ -879,8 +900,24 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         midi_duration_known = False
 
     def invalidate_instrument_options() -> None:
-        nonlocal instrument_options_loaded
+        nonlocal instrument_options_loaded, instrument_options_signature
         instrument_options_loaded = False
+        instrument_options_signature = ()
+
+    def current_soundfont_library_signature() -> Tuple[Tuple[str, int, int, int], ...]:
+        soundfont_list = _normalize_saved_soundfont_library(
+            state.get("soundfonts", []),
+            primary_soundfont=str(state.get("soundfont", "")),
+        )
+        signature: List[Tuple[str, int, int, int]] = []
+        for soundfont_path in soundfont_list:
+            key = _soundfont_identity(soundfont_path)
+            try:
+                stat = os.stat(soundfont_path)
+                signature.append((key, int(stat.st_mtime_ns), int(stat.st_ctime_ns), int(stat.st_size)))
+            except OSError:
+                signature.append((key, -1, -1, -1))
+        return tuple(signature)
 
     def refresh_track_entries() -> None:
         nonlocal track_entries, track_entries_loaded
@@ -914,6 +951,8 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                 events,
                 header.division,
                 stuck_note_fix_mode=str(state.get("stuck_note_fix", "auto")),
+                long_note_threshold=float(state.get("long_note_threshold", 0.0)),
+                long_note_duration=float(state.get("long_note_duration", 0.0)),
             )
             if spans_for_bounds:
                 midi_duration_sec = max(float(sp.end) for sp in spans_for_bounds)
@@ -945,11 +984,15 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         full_vel = max(1.0, min(127.0, float(state.get("dynamics_full_velocity", 96.0))))
         pedal_opacity = max(0.0, min(1.0, float(state.get("pedal_opacity_scale", 0.5))))
         pedal_decay = max(0.0, float(state.get("pedal_decay_seconds", 10.0)))
+        long_note_threshold = max(0.0, float(state.get("long_note_threshold", 0.0)))
+        long_note_duration = max(0.0, float(state.get("long_note_duration", 10.0)))
         state["speed"] = round(speed, 3)
         state["fps"] = int(fps)
         state["dynamics_full_velocity"] = round(full_vel, 3)
         state["pedal_opacity_scale"] = round(pedal_opacity, 3)
         state["pedal_decay_seconds"] = round(pedal_decay, 3)
+        state["long_note_threshold"] = round(long_note_threshold, 3)
+        state["long_note_duration"] = round(long_note_duration, 3)
         state["start"] = round(max(0.0, float(state.get("start", 0.0))), 3)
         state["range"] = normalize_note_range_text(str(state.get("range", "")))
         if midi_duration_known and midi_duration_sec > 0:
@@ -959,7 +1002,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             )
 
     def refresh_instrument_options() -> None:
-        nonlocal instrument_options_loaded
+        nonlocal instrument_options_loaded, instrument_options_signature
         default_sf = str(state.get("soundfont", "")).strip()
         cur_sf, current_bank, current_prog = parse_instrument_spec(str(state["instrument"]), (0, 0), default_sf)
         current_pair = _clamp_instrument_pair(current_bank, current_prog)
@@ -1020,9 +1063,10 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                 track_instr.pop(tk, None)
         state["track_instruments"] = track_instr
         instrument_options_loaded = True
+        instrument_options_signature = current_soundfont_library_signature()
 
     def ensure_instrument_options_loaded(stdscr: Optional["curses._CursesWindow"] = None) -> None:
-        if instrument_options_loaded:
+        if instrument_options_loaded and instrument_options_signature == current_soundfont_library_signature():
             return
         soundfont_list = _normalize_saved_soundfont_library(
             state.get("soundfonts", []),
@@ -1870,12 +1914,13 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         demo_proc: Optional[subprocess.Popen] = None
         demo_temp_midi: Optional[str] = None
         demo_player: Optional[Any] = None
+        demo_soundfont_key = ""
         demo_preview_spans = make_instrument_preview_spans()
         demo_duration = max((sp.end for sp in demo_preview_spans), default=0.0)
         demo_started_perf: Optional[float] = None
 
         def stop_demo(close_player: bool = False) -> None:
-            nonlocal demo_proc, demo_temp_midi, demo_player, demo_started_perf
+            nonlocal demo_proc, demo_temp_midi, demo_player, demo_started_perf, demo_soundfont_key
             if demo_proc is not None:
                 stop_process(demo_proc)
                 demo_proc = None
@@ -1898,14 +1943,16 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                         except Exception:
                             pass
                     demo_player = None
+                    demo_soundfont_key = ""
 
         def start_demo_python(option_text: str) -> Optional[str]:
-            nonlocal demo_player, demo_started_perf
+            nonlocal demo_player, demo_started_perf, demo_soundfont_key
             soundfont = instrument_option_soundfont(option_text, str(state.get("soundfont", ""))).strip()
             if not soundfont:
                 return "Select a SoundFont first."
             if not os.path.exists(soundfont):
                 return f"SoundFont not found: {soundfont}"
+            soundfont_key = _soundfont_identity(soundfont)
             pair = parse_instrument_pair(option_text, parse_instrument_pair(str(state["instrument"])))
             driver = _resolve_audio_driver(str(state.get("audio_driver", "")))
             gain = float(state.get("audio_gain", 0.6))
@@ -1915,6 +1962,10 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             polyphony = int(state.get("audio_polyphony", 0) or 0)
             try:
                 with _suppress_stderr_fd():
+                    if demo_player is not None and demo_soundfont_key != soundfont_key:
+                        demo_player.close()
+                        demo_player = None
+                        demo_soundfont_key = ""
                     if demo_player is None:
                         demo_player = RealtimeFluidSynthPlayer(
                             spans=demo_preview_spans,
@@ -1929,6 +1980,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                             channel_programs={0: pair},
                             control_events=[],
                         )
+                        demo_soundfont_key = soundfont_key
                     else:
                         demo_player.set_channel_program(0, pair[0], pair[1])
                         demo_player.set_gain(gain)
@@ -1943,6 +1995,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                         except Exception:
                             pass
                     demo_player = None
+                demo_soundfont_key = ""
                 demo_started_perf = None
                 return str(exc)
 
@@ -2667,6 +2720,8 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                     export_args.track_instruments = dict(state["track_instruments"])
                     export_args.track_volumes = dict(state["track_volumes"])
                     export_args.stuck_note_fix = normalize_stuck_note_fix_mode(str(state["stuck_note_fix"]))
+                    export_args.long_note_threshold = float(state["long_note_threshold"])
+                    export_args.long_note_duration = float(state["long_note_duration"])
                     saved_path = export_configured_midi_to_mp3(export_args, out_path, stdscr=stdscr)
                     _message_popup(stdscr, " Export MP3 ", f"Saved to:\n{saved_path}")
                 except Exception as exc:
@@ -3116,6 +3171,8 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
     args.speed = float(state["speed"])
     args.midi_flip = bool(state["midi_flip"])
     args.stuck_note_fix = normalize_stuck_note_fix_mode(str(state["stuck_note_fix"]))
+    args.long_note_threshold = max(0.0, float(state["long_note_threshold"]))
+    args.long_note_duration = max(0.0, float(state["long_note_duration"]))
     args.start = float(state["start"])
     args.range = str(state["range"])
     args.hide_piano = bool(state["hide_piano"])
@@ -3172,6 +3229,8 @@ def export_configured_midi_to_mp3(
         stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
         midi_flip=bool(getattr(args, "midi_flip", False)),
         flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+        long_note_threshold=float(getattr(args, "long_note_threshold", 0.0)),
+        long_note_duration=float(getattr(args, "long_note_duration", 0.0)),
     )
     if not spans:
         raise ValueError("No playable notes found in MIDI")

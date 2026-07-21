@@ -133,6 +133,7 @@ struct NoteDiagnostics {
     stuck_note_fix_mode: u8,
     overlap_fixes: u64,
     orphan_note_offs: u64,
+    long_note_trims: u64,
     remaining_unmatched_note_ons: u64,
 }
 
@@ -474,6 +475,7 @@ impl NativePackedPlaybackSource {
         )?;
         out.set_item("overlap_fixes", self.note_diag.overlap_fixes)?;
         out.set_item("orphan_note_offs", self.note_diag.orphan_note_offs)?;
+        out.set_item("long_note_trims", self.note_diag.long_note_trims)?;
         out.set_item(
             "remaining_unmatched_note_ons",
             self.note_diag.remaining_unmatched_note_ons,
@@ -685,13 +687,15 @@ fn native_runtime_info() -> &'static str {
 }
 
 #[pyfunction]
-#[pyo3(signature = (midi_path, stuck_note_fix_mode="off", midi_flip=false, flip_lo=None, flip_hi=None, initial_ready_sec=None))]
+#[pyo3(signature = (midi_path, stuck_note_fix_mode="off", midi_flip=false, flip_lo=None, flip_hi=None, long_note_threshold=0.0, long_note_duration=0.0, initial_ready_sec=None))]
 fn start_packed_playback_load_task_native(
     midi_path: &str,
     stuck_note_fix_mode: &str,
     midi_flip: bool,
     flip_lo: Option<u8>,
     flip_hi: Option<u8>,
+    long_note_threshold: f64,
+    long_note_duration: f64,
     initial_ready_sec: Option<f64>,
 ) -> NativePackedLoadTask {
     let state = Arc::new(Mutex::new(LoadProgressState::new()));
@@ -700,6 +704,8 @@ fn start_packed_playback_load_task_native(
     let handle_cancel_flag = Arc::clone(&cancel_flag);
     let midi_path = midi_path.to_owned();
     let stuck_note_fix_mode = stuck_note_fix_mode.to_owned();
+    let long_note_threshold = long_note_threshold.max(0.0);
+    let long_note_duration = long_note_duration.max(0.0);
     let handle = thread::spawn(move || {
         let result = (|| -> PyResult<NativePackedPlaybackSource> {
             let (ticks_per_qn, track_events) = parse_midi_file_with_progress(
@@ -726,6 +732,8 @@ fn start_packed_playback_load_task_native(
                 &track_events,
                 ticks_per_qn,
                 &stuck_note_fix_mode,
+                long_note_threshold,
+                long_note_duration,
                 initial_ready_sec,
                 || handle_cancel_flag.load(AtomicOrdering::Relaxed),
                 |source| {
@@ -801,7 +809,7 @@ fn start_packed_playback_load_task_native(
 }
 
 #[pyfunction]
-#[pyo3(signature = (midi_path, stuck_note_fix_mode="off", midi_flip=false, flip_lo=None, flip_hi=None))]
+#[pyo3(signature = (midi_path, stuck_note_fix_mode="off", midi_flip=false, flip_lo=None, flip_hi=None, long_note_threshold=0.0, long_note_duration=0.0))]
 fn load_packed_playback_source_native(
     py: Python<'_>,
     midi_path: &str,
@@ -809,15 +817,21 @@ fn load_packed_playback_source_native(
     midi_flip: bool,
     flip_lo: Option<u8>,
     flip_hi: Option<u8>,
+    long_note_threshold: f64,
+    long_note_duration: f64,
 ) -> PyResult<NativePackedPlaybackSource> {
     let midi_path = midi_path.to_owned();
     let stuck_note_fix_mode = stuck_note_fix_mode.to_owned();
+    let long_note_threshold = long_note_threshold.max(0.0);
+    let long_note_duration = long_note_duration.max(0.0);
     py.allow_threads(move || {
         let (ticks_per_qn, track_events) = parse_midi_file(&midi_path)?;
         let mut rows = build_native_rows_streaming(
             &track_events,
             ticks_per_qn,
             &stuck_note_fix_mode,
+            long_note_threshold,
+            long_note_duration,
             None,
             || false,
             |_| {},
@@ -852,6 +866,8 @@ fn debug_native_profile_load(
             &track_events,
             ticks_per_qn,
             &mode,
+            0.0,
+            0.0,
             None,
             || false,
             |_| {},
@@ -874,6 +890,7 @@ fn debug_native_profile_load(
         out.set_item("stuck_note_fix_mode", i32::from(rows.note_diag.stuck_note_fix_mode))?;
         out.set_item("overlap_fixes", rows.note_diag.overlap_fixes)?;
         out.set_item("orphan_note_offs", rows.note_diag.orphan_note_offs)?;
+        out.set_item("long_note_trims", rows.note_diag.long_note_trims)?;
         out.set_item(
             "remaining_unmatched_note_ons",
             rows.note_diag.remaining_unmatched_note_ons,
@@ -1239,6 +1256,8 @@ fn build_native_rows_streaming<F>(
     track_events: &[Vec<RawEvent>],
     ticks_per_qn: u16,
     stuck_note_fix_mode: &str,
+    long_note_threshold: f64,
+    long_note_duration: f64,
     initial_ready_sec: Option<f64>,
     should_cancel: impl Fn() -> bool,
     mut partial_ready_cb: impl FnMut(NativePackedPlaybackSource),
@@ -1262,6 +1281,7 @@ where
                 stuck_note_fix_mode: 0,
                 overlap_fixes: 0,
                 orphan_note_offs: 0,
+                long_note_trims: 0,
                 remaining_unmatched_note_ons: 0,
             },
             duration_sec: 0.0,
@@ -1269,6 +1289,8 @@ where
     }
 
     let mode = normalize_stuck_note_fix_mode(stuck_note_fix_mode);
+    let long_note_threshold = long_note_threshold.max(0.0);
+    let long_note_duration = long_note_duration.max(0.0);
     let total_events: usize = track_events.iter().map(Vec::len).sum();
     let estimated_note_rows = total_events / 2;
     let slot_count = track_events.len().saturating_mul(16 * 128);
@@ -1286,6 +1308,7 @@ where
     active_slots.resize_with(slot_count, VecDeque::new);
     let mut overlap_fixes = 0u64;
     let mut orphan_note_offs = 0u64;
+    let mut long_note_trims = 0u64;
     let mut max_tick = 0u64;
     let mut duration_sec = 0.0f64;
 
@@ -1393,9 +1416,18 @@ where
                 if event.tick <= start_note.start_tick {
                     continue;
                 }
-                end_sec[start_note.span_idx] = current_sec;
+                let (trimmed_end, was_trimmed) = trim_long_note_end(
+                    start_sec[start_note.span_idx],
+                    current_sec,
+                    long_note_threshold,
+                    long_note_duration,
+                );
+                end_sec[start_note.span_idx] = trimmed_end;
+                if was_trimmed {
+                    long_note_trims = long_note_trims.saturating_add(1);
+                }
                 by_end.push(start_note.span_idx);
-                duration_sec = duration_sec.max(current_sec);
+                duration_sec = duration_sec.max(trimmed_end);
             }
         }
 
@@ -1419,6 +1451,9 @@ where
                     mode,
                     overlap_fixes,
                     orphan_note_offs,
+                    long_note_threshold,
+                    long_note_duration,
+                    long_note_trims,
                 ));
                 next_partial_snapshot_sec = Some(
                     next_partial_snapshot_sec
@@ -1486,6 +1521,15 @@ where
             true
         });
     }
+    by_end.sort_by(|a, b| {
+        end_sec[*a]
+            .partial_cmp(&end_sec[*b])
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| start_sec[*a].partial_cmp(&start_sec[*b]).unwrap_or(Ordering::Equal))
+            .then_with(|| note[*a].cmp(&note[*b]))
+            .then_with(|| channel[*a].cmp(&channel[*b]))
+    });
+    duration_sec = end_sec.iter().copied().fold(0.0, f64::max);
     start_sec.shrink_to_fit();
     end_sec.shrink_to_fit();
     note.shrink_to_fit();
@@ -1515,6 +1559,9 @@ where
             mode,
             overlap_fixes,
             orphan_note_offs,
+            long_note_threshold,
+            long_note_duration,
+            long_note_trims,
         ));
         next_partial_snapshot_sec = Some(
             next_partial_snapshot_sec
@@ -1550,6 +1597,7 @@ where
             },
             overlap_fixes,
             orphan_note_offs,
+            long_note_trims,
             remaining_unmatched_note_ons,
         },
         duration_sec,
@@ -1572,6 +1620,9 @@ fn build_partial_ready_source(
     mode: &str,
     overlap_fixes: u64,
     orphan_note_offs: u64,
+    long_note_threshold: f64,
+    long_note_duration: f64,
+    long_note_trims: u64,
 ) -> NativePackedPlaybackSource {
     let active_count: usize = active_slots.iter().map(VecDeque::len).sum();
     let mut out_start = start_sec.to_vec();
@@ -1601,7 +1652,13 @@ fn build_partial_ready_source(
             }
             let new_idx = out_start.len();
             out_start.push(start);
-            out_end.push(current_sec);
+            let (trimmed_end, _) = trim_long_note_end(
+                start,
+                current_sec,
+                long_note_threshold,
+                long_note_duration,
+            );
+            out_end.push(trimmed_end);
             out_note.push(note[idx]);
             out_velocity.push(velocity[idx]);
             out_channel.push(channel[idx]);
@@ -1637,10 +1694,28 @@ fn build_partial_ready_source(
             },
             overlap_fixes,
             orphan_note_offs,
+            long_note_trims,
             remaining_unmatched_note_ons: active_count as u64,
         },
         duration_sec: current_sec.max(0.0),
     })
+}
+
+fn trim_long_note_end(
+    start_sec: f64,
+    end_sec: f64,
+    threshold_sec: f64,
+    trimmed_duration_sec: f64,
+) -> (f64, bool) {
+    if threshold_sec > 0.0
+        && trimmed_duration_sec > 0.0
+        && (end_sec - start_sec) > threshold_sec
+    {
+        let capped_end = end_sec.min(start_sec + trimmed_duration_sec);
+        (capped_end, capped_end < end_sec)
+    } else {
+        (end_sec, false)
+    }
 }
 
 fn bar_ticks_for_signature(numer: u32, denom: u32, ticks_per_qn: u16) -> u64 {
@@ -1710,7 +1785,11 @@ fn read_varlen(data: &[u8], mut i: usize) -> PyResult<(u64, usize)> {
 }
 
 fn latin1_trimmed(bytes: &[u8]) -> String {
-    let text: String = bytes.iter().map(|byte| char::from(*byte)).collect();
+    let text: String = bytes
+        .iter()
+        .filter(|&&byte| byte != 0)
+        .map(|byte| char::from(*byte))
+        .collect();
     text.trim().to_owned()
 }
 

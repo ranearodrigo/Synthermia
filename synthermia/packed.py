@@ -474,6 +474,8 @@ def start_background_packed_playback_load(
     stuck_note_fix_mode: str = "off",
     midi_flip: bool = False,
     flip_bounds: Optional[Tuple[int, int]] = None,
+    long_note_threshold: float = 0.0,
+    long_note_duration: float = 0.0,
     initial_ready_sec: Optional[float] = None,
 ) -> BackgroundPlaybackLoadTask:
     if not native_packed_task_available():
@@ -489,6 +491,8 @@ def start_background_packed_playback_load(
         bool(midi_flip),
         flip_lo,
         flip_hi,
+        max(0.0, float(long_note_threshold)),
+        max(0.0, float(long_note_duration)),
         None if initial_ready_sec is None else float(initial_ready_sec),
     )
     return BackgroundPlaybackLoadTask(native_task)
@@ -512,6 +516,8 @@ def load_selected_playback_data(
     stuck_note_fix_mode: str = "off",
     midi_flip: bool = False,
     flip_bounds: Optional[Tuple[int, int]] = None,
+    long_note_threshold: float = 0.0,
+    long_note_duration: float = 0.0,
     playback_engine: str = "auto",
 ) -> LoadedPlaybackData:
     engine_requested = resolve_playback_engine(playback_engine)
@@ -541,6 +547,8 @@ def load_selected_playback_data(
                     bool(midi_flip),
                     flip_lo,
                     flip_hi,
+                    max(0.0, float(long_note_threshold)),
+                    max(0.0, float(long_note_duration)),
                 )
                 native_controls = _coerce_control_events(native_source.control_tuples())
                 native_measure_times = [float(value) for value in native_source.measure_times()]
@@ -566,6 +574,8 @@ def load_selected_playback_data(
                 stuck_note_fix_mode=stuck_note_fix_mode,
                 midi_flip=midi_flip,
                 flip_bounds=flip_bounds,
+                long_note_threshold=long_note_threshold,
+                long_note_duration=long_note_duration,
             )
             packed_source = PackedPlaybackSource.from_python(
                 spans,
@@ -581,6 +591,8 @@ def load_selected_playback_data(
             stuck_note_fix_mode=stuck_note_fix_mode,
             midi_flip=midi_flip,
             flip_bounds=flip_bounds,
+            long_note_threshold=long_note_threshold,
+            long_note_duration=long_note_duration,
         )
 
     return LoadedPlaybackData(

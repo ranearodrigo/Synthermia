@@ -252,6 +252,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default="auto",
         help="Handle overlapping same-pitch note-ons in imperfect MIDI: auto, off, or lifo",
     )
+    p.add_argument(
+        "--long-note-threshold",
+        type=float,
+        default=0.0,
+        help="Trim notes longer than this many seconds; 0 disables the cleanup (default: 0)",
+    )
+    p.add_argument(
+        "--long-note-duration",
+        type=float,
+        default=10.0,
+        help="Duration in seconds to keep when long-note cleanup applies (default: 10)",
+    )
     p.add_argument("--start", type=float, default=0.0, help="Start time in seconds")
     p.add_argument("--range", type=str, default="", help="Forced note range as min:max (example: 36:84)")
     p.add_argument("--hide-piano", action="store_true", help="Hide the piano canvas and show only the off-piano art")
@@ -294,6 +306,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"  {port_id}  {label}")
         return 0
     args.stuck_note_fix = normalize_stuck_note_fix_mode(str(getattr(args, "stuck_note_fix", "auto")))
+    args.long_note_threshold = max(0.0, float(getattr(args, "long_note_threshold", 0.0)))
+    args.long_note_duration = max(0.0, float(getattr(args, "long_note_duration", 10.0)))
     if not hasattr(args, "track_instruments"):
         args.track_instruments = {}
     if not hasattr(args, "track_colors"):
@@ -354,6 +368,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
                     midi_flip=bool(getattr(args, "midi_flip", False)),
                     flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+                    long_note_threshold=float(getattr(args, "long_note_threshold", 0.0)),
+                    long_note_duration=float(getattr(args, "long_note_duration", 0.0)),
                     playback_engine=str(getattr(args, "playback_engine", "auto")),
                 )
 
@@ -374,6 +390,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
                         midi_flip=bool(getattr(args, "midi_flip", False)),
                         flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+                        long_note_threshold=float(getattr(args, "long_note_threshold", 0.0)),
+                        long_note_duration=float(getattr(args, "long_note_duration", 0.0)),
                         initial_ready_sec=partial_start_buffer_sec,
                     )
                     if _should_use_loading_popup(args, from_config_screen=loaded_from_config_screen):
@@ -397,6 +415,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "auto")),
                             midi_flip=bool(getattr(args, "midi_flip", False)),
                             flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+                            long_note_threshold=float(getattr(args, "long_note_threshold", 0.0)),
+                            long_note_duration=float(getattr(args, "long_note_duration", 0.0)),
                         )
                         loaded = run_background_task_popup(
                             " Loading MIDI ",
@@ -428,14 +448,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             overlap_fixes = int(note_diag.get("overlap_fixes", 0))
             orphan_offs = int(note_diag.get("orphan_note_offs", 0))
             unmatched_ons = int(note_diag.get("remaining_unmatched_note_ons", 0))
+            long_note_trims = int(note_diag.get("long_note_trims", 0))
             if (
                 (not loaded.is_partial)
-                and str(getattr(args, "stuck_note_fix", "off")) != "off"
-                and (overlap_fixes > 0 or orphan_offs > 0)
+                and (overlap_fixes > 0 or orphan_offs > 0 or long_note_trims > 0)
             ):
                 print(
                     f"MIDI cleanup: fixed {overlap_fixes} overlap(s), "
-                    f"saw {orphan_offs} orphan note-off(s), {unmatched_ons} unmatched note-on(s) remain.",
+                    f"trimmed {long_note_trims} long note(s), saw {orphan_offs} orphan note-off(s), "
+                    f"{unmatched_ons} unmatched note-on(s) remain.",
                     file=sys.stderr,
                 )
 

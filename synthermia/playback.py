@@ -11,6 +11,7 @@ import struct
 import subprocess
 import sys
 import termios
+import tempfile
 import time
 import tty
 from bisect import bisect_left, bisect_right
@@ -45,6 +46,7 @@ from synthermia.config import (
 from synthermia.midi import (
     write_varlen,
 )
+from synthermia.media_controls import MediaCommand, MprisMediaControls
 from synthermia.models import (
     DEFAULT_TEMPO_US_PER_QN,
     MAX_PIANO_NOTE,
@@ -690,10 +692,12 @@ def playback(
         overlap_fixes = int(diag.get("overlap_fixes", 0))
         orphan_offs = int(diag.get("orphan_note_offs", 0))
         unmatched_ons = int(diag.get("remaining_unmatched_note_ons", 0))
-        if str(getattr(args, "stuck_note_fix", "off")) != "off" and (overlap_fixes > 0 or orphan_offs > 0):
+        long_note_trims = int(diag.get("long_note_trims", 0))
+        if overlap_fixes > 0 or orphan_offs > 0 or long_note_trims > 0:
             print(
                 f"MIDI cleanup: fixed {overlap_fixes} overlap(s), "
-                f"saw {orphan_offs} orphan note-off(s), {unmatched_ons} unmatched note-on(s) remain.",
+                f"trimmed {long_note_trims} long note(s), saw {orphan_offs} orphan note-off(s), "
+                f"{unmatched_ons} unmatched note-on(s) remain.",
                 file=sys.stderr,
             )
         final_note_diag_reported = True
@@ -722,6 +726,8 @@ def playback(
                 stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "off")),
                 midi_flip=bool(getattr(args, "midi_flip", False)),
                 flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+                long_note_threshold=float(getattr(args, "long_note_threshold", 0.0)),
+                long_note_duration=float(getattr(args, "long_note_duration", 0.0)),
                 playback_engine=str(getattr(args, "playback_engine", "auto")),
             )
 
@@ -741,6 +747,8 @@ def playback(
                     stuck_note_fix_mode=str(getattr(args, "stuck_note_fix", "off")),
                     midi_flip=bool(getattr(args, "midi_flip", False)),
                     flip_bounds=resolve_midi_flip_bounds(str(getattr(args, "range", ""))),
+                    long_note_threshold=float(getattr(args, "long_note_threshold", 0.0)),
+                    long_note_duration=float(getattr(args, "long_note_duration", 0.0)),
                     initial_ready_sec=partial_start_buffer_sec if use_partial_start else None,
                 )
                 if use_partial_start:
@@ -986,6 +994,65 @@ def playback(
             return
         restart_audio(at_time)
 
+    def set_paused(next_paused: bool) -> None:
+        nonlocal paused
+        next_state = bool(next_paused)
+        if paused == next_state:
+            return
+        paused = next_state
+        if paused:
+            stop_audio_only()
+        else:
+            sync_audio_to_time(play_t)
+
+    def seek_to(target_time: float) -> None:
+        nonlocal play_t
+        requested_target = max(0.0, float(target_time))
+        if pending_packed_task is not None and requested_target > (end_time - 0.25):
+            promote_pending_packed_source(
+                force_wait=True,
+                wait_target_override=requested_target + partial_buffer_resume_ahead_sec(),
+            )
+        seek_target = min(requested_target, float(end_time))
+        play_t = min(current_ready_timeline_sec() + 1.0, seek_target)
+        if not paused:
+            sync_audio_to_time(play_t)
+        else:
+            set_play_clock(play_t)
+
+    def set_volume(next_gain: float) -> None:
+        nonlocal audio_gain
+        audio_gain = max(0.0, min(2.0, float(next_gain)))
+        if py_audio is not None:
+            py_audio.set_gain(audio_gain)
+        elif not paused and args.soundfont:
+            sync_audio_to_time(play_t)
+
+    def adjust_volume(delta: float) -> None:
+        set_volume(audio_gain + float(delta))
+
+    def apply_media_command(command: MediaCommand) -> bool:
+        action = command.action
+        if action == "toggle_pause":
+            set_paused(not paused)
+        elif action == "pause":
+            set_paused(True)
+        elif action == "play":
+            set_paused(False)
+        elif action == "seek_back":
+            seek_to(play_t - 5.0)
+        elif action == "seek_forward":
+            seek_to(play_t + 5.0)
+        elif action == "seek_relative":
+            seek_to(play_t + float(command.value or 0.0))
+        elif action == "seek_absolute":
+            seek_to(float(command.value or 0.0))
+        elif action == "set_volume":
+            set_volume(float(command.value or 0.0))
+        elif action == "quit":
+            return False
+        return True
+
     def stop_audio_only() -> None:
         nonlocal audio_proc
         if py_audio is not None:
@@ -1118,6 +1185,9 @@ def playback(
         tty.setcbreak(stdin_fd)
         fcntl.fcntl(stdin_fd, fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
 
+    media_controls = MprisMediaControls(title=title)
+    media_controls.start()
+
     try:
         enter_playback_input_mode()
         sync_audio_to_time(play_t)
@@ -1128,6 +1198,7 @@ def playback(
                 update_play_time(now)
                 if py_audio is not None:
                     py_audio.update(play_t)
+            media_controls.update(paused=paused, position_sec=play_t, volume=audio_gain, title=title)
 
             while True:
                 ready, _, _ = select.select([stdin_fd], [], [], 0)
@@ -1141,13 +1212,12 @@ def playback(
                     break
                 keybuf += data.decode("utf-8", errors="ignore")
             keys, keybuf = parse_keys(keybuf)
+            for command in media_controls.pop_commands():
+                if not apply_media_command(command):
+                    return False
             for key in keys:
                 if key == " ":
-                    paused = not paused
-                    if paused:
-                        stop_audio_only()
-                    else:
-                        sync_audio_to_time(play_t)
+                    set_paused(not paused)
                 elif key in {"e", "E"}:
                     resume_hint = float(play_t)
                     paused = True
@@ -1166,35 +1236,13 @@ def playback(
                     sync_audio_to_time(play_t)
                     keybuf = ""
                 elif key == "LEFT":
-                    play_t = max(0.0, play_t - 5.0)
-                    if not paused:
-                        sync_audio_to_time(play_t)
-                    else:
-                        set_play_clock(play_t)
+                    seek_to(play_t - 5.0)
                 elif key == "RIGHT":
-                    seek_target = play_t + 5.0
-                    if pending_packed_task is not None and seek_target > (end_time - 0.25):
-                        promote_pending_packed_source(
-                            force_wait=True,
-                            wait_target_override=seek_target + partial_buffer_resume_ahead_sec(),
-                        )
-                    play_t = min(current_ready_timeline_sec() + 1.0, seek_target)
-                    if not paused:
-                        sync_audio_to_time(play_t)
-                    else:
-                        set_play_clock(play_t)
+                    seek_to(play_t + 5.0)
                 elif key == "UP":
-                    audio_gain = min(2.0, audio_gain + 0.05)
-                    if py_audio is not None:
-                        py_audio.set_gain(audio_gain)
-                    elif not paused and args.soundfont:
-                        sync_audio_to_time(play_t)
+                    adjust_volume(0.05)
                 elif key == "DOWN":
-                    audio_gain = max(0.0, audio_gain - 0.05)
-                    if py_audio is not None:
-                        py_audio.set_gain(audio_gain)
-                    elif not paused and args.soundfont:
-                        sync_audio_to_time(play_t)
+                    adjust_volume(-0.05)
                 elif key in {"q", "Q"}:
                     return False
 
@@ -1369,6 +1417,7 @@ def playback(
                 time.sleep(sleep_for)
         return True
     finally:
+        media_controls.stop()
         if py_audio is not None:
             py_audio.close()
         stop_process(audio_proc)

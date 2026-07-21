@@ -463,6 +463,8 @@ def args_to_saved_config(args: argparse.Namespace, selected_midi: str) -> Dict[s
         "speed": args.speed,
         "midi_flip": bool(getattr(args, "midi_flip", False)),
         "stuck_note_fix": _normalize_saved_stuck_note_fix_mode(str(getattr(args, "stuck_note_fix", "auto"))),
+        "long_note_threshold": max(0.0, float(getattr(args, "long_note_threshold", 0.0))),
+        "long_note_duration": max(0.0, float(getattr(args, "long_note_duration", 10.0))),
         "start": args.start,
         "range": normalize_note_range_text(str(args.range)),
         "hide_piano": bool(getattr(args, "hide_piano", False)),
