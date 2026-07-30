@@ -1022,6 +1022,9 @@ def render_frame(
         vel = max(1, min(127, int(getattr(sp, "velocity", 100))))
         x = note_x(sp.note, x_scale)
         if direction == "up":
+            tail_seam_y = int(
+                math.ceil(float(hit_row) - ((float(t) - float(sp.start)) * float(move_speed)) - 1e-6)
+            )
             sample_t_lo = max(float(sp.start), float(t) - (float(hit_row) / max(1e-6, float(move_speed))))
             sample_t_hi = min(float(sp.end), float(t))
             if sample_t_hi < sample_t_lo:
@@ -1036,12 +1039,12 @@ def render_frame(
             y_bottom = min(hit_row, raw_y_bottom)
             if y_bottom < y_top:
                 continue
-            y_bottom = min(y_bottom, pedal_visible_y2(raw_y_top, raw_y_bottom, move_pedal_row_cap))
+            y_bottom = min(y_bottom, pedal_visible_y2(tail_seam_y, raw_y_bottom, move_pedal_row_cap))
             if y_bottom < y_top:
                 continue
             if is_white(sp.note):
                 for y in range(y_top, y_bottom + 1):
-                    pedal_cell_alpha = pedal_cell_alpha_at_distance(y - raw_y_top, move_pedal_alpha_by_dist)
+                    pedal_cell_alpha = pedal_cell_alpha_at_distance(y - tail_seam_y, move_pedal_alpha_by_dist)
                     if pedal_cell_alpha <= 0.0:
                         continue
                     for dx in range(white_w):
@@ -1073,7 +1076,7 @@ def render_frame(
                     + note_pedal_black_right
                 )
             for y in range(y_top, y_bottom + 1):
-                pedal_cell_alpha = pedal_cell_alpha_at_distance(y - raw_y_top, move_pedal_alpha_by_dist)
+                pedal_cell_alpha = pedal_cell_alpha_at_distance(y - tail_seam_y, move_pedal_alpha_by_dist)
                 if pedal_cell_alpha <= 0.0:
                     continue
                 for dx in range(bw):
