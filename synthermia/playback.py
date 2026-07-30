@@ -1858,7 +1858,9 @@ def playback_live_midi_input(args: argparse.Namespace) -> None:
             ) < play_t:
                 completed_pedal_spans.popleft()
             render_spans = list(visual_recent_spans)
-            pedal_render_spans: List[NoteSpan] = list(completed_pedal_spans)
+            pedal_render_spans: List[NoteSpan] = (
+                list(completed_pedal_spans) if pedal_visual_enabled else []
+            )
             for (ch, note), starts in pressed_notes.items():
                 for start_t, vel, color_track in starts:
                     render_spans.append(
