@@ -86,6 +86,10 @@ class BackgroundTaskCancelled(Exception):
     pass
 
 
+def _is_picker_navigation_key(key: int) -> bool:
+    return key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE)
+
+
 @contextlib.contextmanager
 def _suppress_stderr_fd() -> Any:
     try:
@@ -1351,6 +1355,8 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             stdscr.refresh()
 
             k = stdscr.getch()
+            if filter_editing and _is_picker_navigation_key(k):
+                filter_editing = False
             if filter_editing:
                 if k in (10, 13, curses.KEY_ENTER, curses.KEY_EXIT):
                     filter_editing = False
@@ -1525,6 +1531,8 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
 
             stdscr.refresh()
             k = stdscr.getch()
+            if filter_editing and _is_picker_navigation_key(k):
+                filter_editing = False
             if filter_editing:
                 if k in (10, 13, curses.KEY_ENTER, 27):
                     filter_editing = False
@@ -1689,6 +1697,8 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             stdscr.refresh()
 
             k = stdscr.getch()
+            if filter_editing and _is_picker_navigation_key(k):
+                filter_editing = False
             if filter_editing:
                 if k in (10, 13, curses.KEY_ENTER, curses.KEY_EXIT, 27):
                     filter_editing = False
@@ -2110,6 +2120,8 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             k = stdscr.getch()
             if k == -1:
                 continue
+            if filter_editing and _is_picker_navigation_key(k):
+                filter_editing = False
             if filter_editing:
                 if k in (10, 13, curses.KEY_ENTER, curses.KEY_EXIT):
                     filter_editing = False

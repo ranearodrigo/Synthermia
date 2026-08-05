@@ -69,7 +69,7 @@ python3 main.py --midi-input-mode --soundfont Steinway_D-274.sf2
 
 Running with no arguments opens an interactive configuration screen (curses TUI) where you can:
 - Pick a MIDI file and SoundFont(s)
-- Press `/` to filter settings by name, and `p` to start playback from any setting
+- Press `/` to filter settings by name, and `p` to start playback from any setting; picker filters hand off to results with arrow keys
 - Configure audio engine, driver, output device, gain, and buffer settings
 - Set per-track colors, instruments, and volume overrides with auto-matching to SoundFont presets
 - Adjust visual parameters (rows, scales, glyphs, colors, pedal options)
