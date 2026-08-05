@@ -87,7 +87,7 @@ Settings are persisted to `.synthermia_last_config.json` and restored on next la
 - Optional measure bars in playfield
 - Pedal visualization (dotted hold tails) with independent pedal opacity scaling and configurable fade decay
 - Velocity-based note transparency (dynamics visualization)
-- Per-track color overrides, instrument overrides (SoundFont bank/program), volume overrides (track gain multipliers)
+- Per-track color overrides, instrument overrides (SoundFont bank/program), volume overrides (track gain multipliers); track colors can use freeform RGB or a named ANSI-16 palette, whose automatic choices avoid background and piano-key colors
 - Instrument picker demos (`d`) in every instrument selector (main, track, live-map)
 - Auto-match MIDI track names/instrument names to SoundFont presets using fuzzy similarity
 - Keyboard scaling controls (`rows`, `x_scale`, keyboard Y scale, black key extra rows)

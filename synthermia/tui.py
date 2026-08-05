@@ -29,6 +29,8 @@ from synthermia.audio import (
     stop_process,
 )
 from synthermia.config import (
+    ANSI16_TRACK_COLORS,
+    ANSI16_AUTO_TRACK_COLORS,
     DEFAULT_VISUAL_GLYPHS,
     _clamp_track_volume,
     _format_track_volume_text,
@@ -38,12 +40,14 @@ from synthermia.config import (
     args_to_saved_config,
     clamp_playback_start,
     default_live_hotkey_color,
+    default_ansi16_track_color,
     default_track_color,
     format_live_color_map,
     format_live_instrument_map,
     load_config_profiles,
     load_last_config,
     normalize_color_mode,
+    nearest_ansi16_track_color,
     normalize_pressed_key_color_mode,
     normalize_note_range_text,
     parse_live_color_map,
@@ -490,6 +494,9 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         "piano_color_mode": normalize_color_mode(
             str(saved.get("piano_color_mode", getattr(args, "piano_color_mode", "truecolor")))
         ),
+        "track_color_mode": normalize_color_mode(
+            str(saved.get("track_color_mode", getattr(args, "track_color_mode", "truecolor")))
+        ),
         "color_rendering": "",
         "glyph_note_white": _sanitize_visual_glyph(
             saved.get("glyph_note_white", getattr(args, "glyph_note_white", DEFAULT_VISUAL_GLYPHS["glyph_note_white"])),
@@ -779,6 +786,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             "note_color_mode": normalize_color_mode(str(state["note_color_mode"])),
             "pedal_color_mode": normalize_color_mode(str(state["pedal_color_mode"])),
             "piano_color_mode": normalize_color_mode(str(state["piano_color_mode"])),
+            "track_color_mode": normalize_color_mode(str(state["track_color_mode"])),
             "glyph_note_white": _sanitize_visual_glyph(state["glyph_note_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_white"]),
             "glyph_note_pedal_white": _sanitize_visual_glyph(
                 state["glyph_note_pedal_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_white"]
@@ -2284,6 +2292,18 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         track_instr = dict(state.get("track_instruments", {}))
         track_colors = dict(state.get("track_colors", {}))
         track_volumes = _normalize_saved_track_volume_map(state.get("track_volumes", {}))
+        ansi_track_colors = normalize_color_mode(str(state["track_color_mode"])) == "ansi16"
+        if ansi_track_colors:
+            for track_idx, tr in enumerate(track_entries):
+                tkey = str(tr.index)
+                raw_rgb = parse_rgb_triplet(
+                    track_colors.get(tkey, ""),
+                    default_ansi16_track_color(track_idx),
+                )
+                if tkey in track_colors:
+                    track_colors[tkey] = rgb_triplet_to_text(nearest_ansi16_track_color(raw_rgb))
+                else:
+                    track_colors[tkey] = rgb_triplet_to_text(random.choice(ANSI16_AUTO_TRACK_COLORS)[1])
         selected_line = 0
         offset_line = 0
         default_instrument = str(state["instrument"])
@@ -2434,6 +2454,53 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             except Exception:
                 return curses.A_BOLD if selected else curses.A_NORMAL
 
+        def choose_ansi16_track_color(current_rgb: Tuple[int, int, int]) -> Optional[Tuple[int, int, int]]:
+            selected = min(
+                range(len(ANSI16_TRACK_COLORS)),
+                key=lambda idx: sum(
+                    (current_rgb[channel] - ANSI16_TRACK_COLORS[idx][1][channel]) ** 2 for channel in range(3)
+                ),
+            )
+            while True:
+                stdscr.erase()
+                h, w = stdscr.getmaxyx()
+                stdscr.box()
+                title = " ANSI-16 Track Color "
+                stdscr.addstr(0, max(2, (w - len(title)) // 2), title, curses.A_BOLD)
+                help_line = "Arrow keys move  Enter select  Esc cancel"
+                stdscr.addstr(2, 2, help_line[: max(1, w - 4)])
+                for idx, (name, rgb) in enumerate(ANSI16_TRACK_COLORS):
+                    col = idx % 2
+                    row = idx // 2
+                    x = 2 + col * max(18, (w - 4) // 2)
+                    y = 4 + row
+                    if y >= h - 1:
+                        continue
+                    token = f" {name:<14} "
+                    attr = color_cell_attr(rgb, idx == selected)
+                    if idx == selected:
+                        attr |= curses.A_REVERSE
+                    stdscr.addstr(y, x, token[: max(1, w - x - 2)], attr)
+                stdscr.refresh()
+
+                k = stdscr.getch()
+                if k in (27, ord("q"), ord("Q")):
+                    return None
+                if k == curses.KEY_UP:
+                    selected = (selected - 2) % len(ANSI16_TRACK_COLORS)
+                    continue
+                if k == curses.KEY_DOWN:
+                    selected = (selected + 2) % len(ANSI16_TRACK_COLORS)
+                    continue
+                if k == curses.KEY_LEFT:
+                    selected = selected - 1 if selected % 2 else selected + 1
+                    continue
+                if k == curses.KEY_RIGHT:
+                    selected = selected + 1 if selected % 2 == 0 else selected - 1
+                    continue
+                if k in (10, 13, curses.KEY_ENTER):
+                    return ANSI16_TRACK_COLORS[selected][1]
+
         while True:
             stdscr.erase()
             h, w = stdscr.getmaxyx()
@@ -2463,7 +2530,11 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                 tr = track_entries[track_idx]
                 key = str(tr.index)
                 inst = track_instr.get(key, default_instrument)
-                default_rgb = default_track_color(track_idx, len(track_entries))
+                default_rgb = (
+                    default_ansi16_track_color(track_idx)
+                    if ansi_track_colors
+                    else default_track_color(track_idx, len(track_entries))
+                )
                 color_txt = track_colors.get(key, rgb_triplet_to_text(default_rgb))
                 volume = _clamp_track_volume(float(track_volumes.get(key, 1.0)))
                 if sub_row == 0:
@@ -2523,18 +2594,31 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             sub_row = selected_line % 4
             tr = track_entries[track_idx]
             tkey = str(tr.index)
-            default_rgb = default_track_color(track_idx, len(track_entries))
+            default_rgb = (
+                default_ansi16_track_color(track_idx)
+                if ansi_track_colors
+                else default_track_color(track_idx, len(track_entries))
+            )
 
             if k in (ord("r"), ord("R")):
                 track_instr.pop(tkey, None)
-                track_colors.pop(tkey, None)
+                if ansi_track_colors:
+                    track_colors[tkey] = rgb_triplet_to_text(random.choice(ANSI16_AUTO_TRACK_COLORS)[1])
+                else:
+                    track_colors.pop(tkey, None)
                 track_volumes.pop(tkey, None)
                 status_msg = f"Track {tr.index + 1} reset."
                 continue
 
             if k in (ord("a"), ord("A")):
                 track_instr.clear()
-                track_colors.clear()
+                if ansi_track_colors:
+                    track_colors = {
+                        str(track.index): rgb_triplet_to_text(random.choice(ANSI16_AUTO_TRACK_COLORS)[1])
+                        for track in track_entries
+                    }
+                else:
+                    track_colors.clear()
                 track_volumes.clear()
                 status_msg = "All track overrides reset."
                 continue
@@ -2602,20 +2686,26 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
 
             if k in (10, 13, curses.KEY_ENTER) and sub_row == 2:
                 cur_txt = track_colors.get(tkey, rgb_triplet_to_text(default_rgb))
-                typed = _edit_text_popup(stdscr, f"Track {tr.index + 1} Color R,G,B", cur_txt)
-                if typed is not None:
-                    typed = typed.strip()
-                if typed:
-                    rgb = parse_rgb_triplet(typed, default_rgb)
-                    txt = rgb_triplet_to_text(rgb)
-                    if txt == rgb_triplet_to_text(default_rgb):
+                if ansi_track_colors:
+                    picked_rgb = choose_ansi16_track_color(parse_rgb_triplet(cur_txt, default_rgb))
+                    if picked_rgb is not None:
+                        track_colors[tkey] = rgb_triplet_to_text(picked_rgb)
+                        status_msg = f"Track {tr.index + 1} ANSI color updated."
+                else:
+                    typed = _edit_text_popup(stdscr, f"Track {tr.index + 1} Color R,G,B", cur_txt)
+                    if typed is not None:
+                        typed = typed.strip()
+                    if typed:
+                        rgb = parse_rgb_triplet(typed, default_rgb)
+                        txt = rgb_triplet_to_text(rgb)
+                        if txt == rgb_triplet_to_text(default_rgb):
+                            track_colors.pop(tkey, None)
+                        else:
+                            track_colors[tkey] = txt
+                        status_msg = f"Track {tr.index + 1} color updated."
+                    elif typed == "":
                         track_colors.pop(tkey, None)
-                    else:
-                        track_colors[tkey] = txt
-                    status_msg = f"Track {tr.index + 1} color updated."
-                elif typed == "":
-                    track_colors.pop(tkey, None)
-                    status_msg = f"Track {tr.index + 1} color reset to default."
+                        status_msg = f"Track {tr.index + 1} color reset to default."
                 continue
             if k in (10, 13, curses.KEY_ENTER) and sub_row == 3:
                 cur_vol = _clamp_track_volume(float(track_volumes.get(tkey, 1.0)))
@@ -2733,12 +2823,14 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             ("note_color_mode", "Notes"),
             ("pedal_color_mode", "Pedal Tails"),
             ("piano_color_mode", "Piano"),
+            ("track_color_mode", "Track Colors"),
             ("terminal_bg_color", "Terminal BG"),
         ]
         values = {
             "note_color_mode": normalize_color_mode(str(state["note_color_mode"])),
             "pedal_color_mode": normalize_color_mode(str(state["pedal_color_mode"])),
             "piano_color_mode": normalize_color_mode(str(state["piano_color_mode"])),
+            "track_color_mode": normalize_color_mode(str(state["track_color_mode"])),
             "terminal_bg_color": str(state["terminal_bg_color"]).strip(),
         }
         selected = 0
@@ -3290,6 +3382,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
     args.note_color_mode = normalize_color_mode(str(state["note_color_mode"]))
     args.pedal_color_mode = normalize_color_mode(str(state["pedal_color_mode"]))
     args.piano_color_mode = normalize_color_mode(str(state["piano_color_mode"]))
+    args.track_color_mode = normalize_color_mode(str(state["track_color_mode"]))
     args.glyph_note_white = _sanitize_visual_glyph(state["glyph_note_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_white"])
     args.glyph_note_pedal_white = _sanitize_visual_glyph(
         state["glyph_note_pedal_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_white"]

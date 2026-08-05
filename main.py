@@ -229,6 +229,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Piano-key colors: truecolor or ansi16 terminal-theme palette (default: truecolor)",
     )
     p.add_argument(
+        "--track-color-mode",
+        type=str,
+        choices=["truecolor", "ansi16"],
+        default="truecolor",
+        help="Track-customization colors: truecolor or ansi16 palette (default: truecolor)",
+    )
+    p.add_argument(
         "--pedal-visual-dots",
         action="store_true",
         help="Show dotted continuation for notes held by sustain pedal after key release",
@@ -368,6 +375,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.note_color_mode = normalize_color_mode(str(getattr(args, "note_color_mode", "truecolor")))
             args.pedal_color_mode = normalize_color_mode(str(getattr(args, "pedal_color_mode", "truecolor")))
             args.piano_color_mode = normalize_color_mode(str(getattr(args, "piano_color_mode", "truecolor")))
+            args.track_color_mode = normalize_color_mode(str(getattr(args, "track_color_mode", "truecolor")))
             normalized_glyphs = resolve_visual_glyphs(args)
             for glyph_key, glyph_val in normalized_glyphs.items():
                 setattr(args, glyph_key, glyph_val)

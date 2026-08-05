@@ -601,7 +601,11 @@ def playback(
     frame_cols = keyboard_width(note_lo, note_hi, effective_x_scale)
     show_piano = not bool(getattr(args, "hide_piano", False))
     track_ids = packed_source.track_ids() if packed_source is not None else [int(getattr(sp, "track", 0)) for sp in spans_active]
-    track_color_map = _build_track_color_map_for_tracks(track_ids, getattr(args, "track_colors", {}))
+    track_color_map = _build_track_color_map_for_tracks(
+        track_ids,
+        getattr(args, "track_colors", {}),
+        str(getattr(args, "track_color_mode", "truecolor")),
+    )
     terminal_bg_rgb = resolve_terminal_bg_rgb(str(getattr(args, "terminal_bg_color", "")))
     visual_glyphs = resolve_visual_glyphs(args)
     controls_src = list(controls or [])
@@ -821,7 +825,11 @@ def playback(
         frame_cols = keyboard_width(note_lo, note_hi, effective_x_scale)
         show_piano = not bool(getattr(args, "hide_piano", False))
         track_ids = packed_source_active.track_ids() if packed_source_active is not None else [int(getattr(sp, "track", 0)) for sp in spans_active]
-        track_color_map = _build_track_color_map_for_tracks(track_ids, getattr(args, "track_colors", {}))
+        track_color_map = _build_track_color_map_for_tracks(
+            track_ids,
+            getattr(args, "track_colors", {}),
+            str(getattr(args, "track_color_mode", "truecolor")),
+        )
         terminal_bg_rgb = resolve_terminal_bg_rgb(str(getattr(args, "terminal_bg_color", "")))
         visual_glyphs = resolve_visual_glyphs(args)
         pedal_visual_spans = []

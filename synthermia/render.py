@@ -14,6 +14,7 @@ from functools import lru_cache
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from synthermia.config import (
+    ANSI16_TRACK_COLORS,
     normalize_color_mode,
     normalize_pressed_key_color_mode,
     normalize_visual_glyphs,
@@ -170,13 +171,10 @@ def blend_rgb(bg_rgb: Tuple[int, int, int], fg_rgb: Tuple[int, int, int], alpha:
 
 
 _ANSI16_RGB: Dict[int, Tuple[int, int, int]] = {
-    0: (0, 0, 0), 1: (205, 0, 0), 2: (0, 205, 0), 3: (205, 205, 0),
-    4: (0, 0, 238), 5: (205, 0, 205), 6: (0, 205, 205), 7: (229, 229, 229),
-    8: (127, 127, 127), 9: (255, 0, 0), 10: (0, 255, 0), 11: (255, 255, 0),
-    12: (92, 92, 255), 13: (255, 0, 255), 14: (0, 255, 255), 15: (255, 255, 255),
+    index: rgb for index, (_name, rgb) in enumerate(ANSI16_TRACK_COLORS)
 }
 
-_ANSI16_NOTE_COLOR_CODES = (31, 32, 33, 34, 35, 36)
+_ANSI16_NOTE_COLOR_CODES = tuple(range(30, 38))
 _ANSI16_THEME_COLOR_CODES = (30, 31, 32, 33, 34, 35, 36, 37)
 
 

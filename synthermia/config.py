@@ -43,6 +43,30 @@ DEFAULT_VISUAL_GLYPHS: Dict[str, str] = {
 
 PROFILES_FILE = ".synthermia_profiles.json"
 
+ANSI16_TRACK_COLORS: Tuple[Tuple[str, Tuple[int, int, int]], ...] = (
+    ("Black", (0, 0, 0)),
+    ("Red", (205, 0, 0)),
+    ("Green", (0, 205, 0)),
+    ("Yellow", (205, 205, 0)),
+    ("Blue", (0, 0, 238)),
+    ("Magenta", (205, 0, 205)),
+    ("Cyan", (0, 205, 205)),
+    ("White", (229, 229, 229)),
+    ("Bright Black", (127, 127, 127)),
+    ("Bright Red", (255, 0, 0)),
+    ("Bright Green", (0, 255, 0)),
+    ("Bright Yellow", (255, 255, 0)),
+    ("Bright Blue", (92, 92, 255)),
+    ("Bright Magenta", (255, 0, 255)),
+    ("Bright Cyan", (0, 255, 255)),
+    ("Bright White", (255, 255, 255)),
+)
+ANSI16_AUTO_TRACK_COLORS = tuple(
+    color
+    for color in ANSI16_TRACK_COLORS
+    if color[0] not in {"Black", "Bright Black", "White", "Bright White"}
+)
+
 
 def _sanitize_visual_glyph(value: object, default: str) -> str:
     txt = str(value or "")
@@ -107,6 +131,17 @@ def default_track_color(track_idx: int, total_tracks: int) -> Tuple[int, int, in
     h = (track_idx % total) / float(total)
     r_f, g_f, b_f = colorsys.hsv_to_rgb(h, 0.75, 0.96)
     return _clamp_rgb_triplet(int(r_f * 255), int(g_f * 255), int(b_f * 255))
+
+
+def default_ansi16_track_color(track_idx: int) -> Tuple[int, int, int]:
+    return ANSI16_AUTO_TRACK_COLORS[int(track_idx) % len(ANSI16_AUTO_TRACK_COLORS)][1]
+
+
+def nearest_ansi16_track_color(rgb: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    return min(
+        (color for _name, color in ANSI16_TRACK_COLORS),
+        key=lambda candidate: sum((int(rgb[idx]) - candidate[idx]) ** 2 for idx in range(3)),
+    )
 
 
 def scan_files_by_ext(extensions: Tuple[str, ...]) -> List[str]:
@@ -416,6 +451,7 @@ def args_to_saved_config(args: argparse.Namespace, selected_midi: str) -> Dict[s
         "note_color_mode": normalize_color_mode(str(getattr(args, "note_color_mode", "truecolor"))),
         "pedal_color_mode": normalize_color_mode(str(getattr(args, "pedal_color_mode", "truecolor"))),
         "piano_color_mode": normalize_color_mode(str(getattr(args, "piano_color_mode", "truecolor"))),
+        "track_color_mode": normalize_color_mode(str(getattr(args, "track_color_mode", "truecolor"))),
         "glyph_note_white": _sanitize_visual_glyph(
             getattr(args, "glyph_note_white", DEFAULT_VISUAL_GLYPHS["glyph_note_white"]),
             DEFAULT_VISUAL_GLYPHS["glyph_note_white"],
