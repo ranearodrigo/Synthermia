@@ -92,7 +92,7 @@ Settings are persisted to `.synthermia_last_config.json` and restored on next la
 - Auto-match MIDI track names/instrument names to SoundFont presets using fuzzy similarity
 - Keyboard scaling controls (`rows`, `x_scale`, keyboard Y scale, black key extra rows)
 - Automatic terminal-background detection, including the active Kitty theme when `Terminal BG` is left on `auto`
-- Note colors can use either truecolor blending or the terminal theme's ANSI-16 palette
+- Color Rendering lets notes, pedal tails, and piano keys independently use truecolor or the terminal theme's ANSI-16 palette
 - Off-piano ornamental background with toggle to plain background
 - Pressed-key color modes: `split` (splits the key between multiple colors), `weighted` (calculates an average color), `off`
 - SoundFont playback with two engines: Python in-process (`pyFluidSynth`) and CLI (`fluidsynth` subprocess)
@@ -131,7 +131,7 @@ Use `python3 main.py -h` for full options. Main groups:
 - **Input**: MIDI file path, live MIDI mode + port + save dir + pedal invert + live mapping strings
 - **Audio**: engine, FluidSynth binary, driver, output device (`--audio-output`), gain, period size/periods/sample rate, SoundFont (`--soundfont`), SoundFont library (`--soundfonts`), bank/program
 - **Playback**: fps, rows, drop speed, speed, start, range, stuck-note-fix, long-note threshold/duration, midi-flip, playback-engine
-- **Visual**: glyphs, note color mode, dynamics threshold, pedal dots/opacity/decay, measure bars, keyboard scale, piano visibility, colors, terminal background, ascii-ui
+- **Visual**: glyphs, note/pedal/piano color modes, dynamics threshold, pedal dots/opacity/decay, measure bars, keyboard scale, piano visibility, colors, terminal background, ascii-ui
 
 ## Optional Native Acceleration
 

@@ -84,7 +84,7 @@ def normalize_pressed_key_color_mode(value: str) -> str:
     return "split"
 
 
-def normalize_note_color_mode(value: str) -> str:
+def normalize_color_mode(value: str) -> str:
     mode = str(value or "").strip().lower()
     if mode in {"ansi", "ansi16", "16", "terminal"}:
         return "ansi16"
@@ -413,7 +413,9 @@ def args_to_saved_config(args: argparse.Namespace, selected_midi: str) -> Dict[s
         "kb_black_extra": args.kb_black_extra,
         "dynamics_full_velocity": float(getattr(args, "dynamics_full_velocity", 96.0)),
         "terminal_bg_color": str(getattr(args, "terminal_bg_color", "")).strip(),
-        "note_color_mode": normalize_note_color_mode(str(getattr(args, "note_color_mode", "truecolor"))),
+        "note_color_mode": normalize_color_mode(str(getattr(args, "note_color_mode", "truecolor"))),
+        "pedal_color_mode": normalize_color_mode(str(getattr(args, "pedal_color_mode", "truecolor"))),
+        "piano_color_mode": normalize_color_mode(str(getattr(args, "piano_color_mode", "truecolor"))),
         "glyph_note_white": _sanitize_visual_glyph(
             getattr(args, "glyph_note_white", DEFAULT_VISUAL_GLYPHS["glyph_note_white"]),
             DEFAULT_VISUAL_GLYPHS["glyph_note_white"],

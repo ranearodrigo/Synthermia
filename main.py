@@ -12,7 +12,7 @@ from synthermia.config import (
     DEFAULT_VISUAL_GLYPHS,
     args_to_saved_config,
     clamp_playback_start,
-    normalize_note_color_mode,
+    normalize_color_mode,
     normalize_note_range_text,
     resolve_midi_flip_bounds,
     resolve_visual_glyphs,
@@ -215,6 +215,20 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Note colors: truecolor or ansi16 terminal-theme palette (default: truecolor)",
     )
     p.add_argument(
+        "--pedal-color-mode",
+        type=str,
+        choices=["truecolor", "ansi16"],
+        default="truecolor",
+        help="Pedal-tail colors: truecolor or ansi16 terminal-theme palette (default: truecolor)",
+    )
+    p.add_argument(
+        "--piano-color-mode",
+        type=str,
+        choices=["truecolor", "ansi16"],
+        default="truecolor",
+        help="Piano-key colors: truecolor or ansi16 terminal-theme palette (default: truecolor)",
+    )
+    p.add_argument(
         "--pedal-visual-dots",
         action="store_true",
         help="Show dotted continuation for notes held by sustain pedal after key release",
@@ -351,7 +365,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if bg_txt and not re.match(r"^\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*$", bg_txt):
                 raise ValueError("--terminal-bg-color must be R,G,B")
             args.terminal_bg_color = bg_txt
-            args.note_color_mode = normalize_note_color_mode(str(getattr(args, "note_color_mode", "truecolor")))
+            args.note_color_mode = normalize_color_mode(str(getattr(args, "note_color_mode", "truecolor")))
+            args.pedal_color_mode = normalize_color_mode(str(getattr(args, "pedal_color_mode", "truecolor")))
+            args.piano_color_mode = normalize_color_mode(str(getattr(args, "piano_color_mode", "truecolor")))
             normalized_glyphs = resolve_visual_glyphs(args)
             for glyph_key, glyph_val in normalized_glyphs.items():
                 setattr(args, glyph_key, glyph_val)

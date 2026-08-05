@@ -14,7 +14,7 @@ from functools import lru_cache
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from synthermia.config import (
-    normalize_note_color_mode,
+    normalize_color_mode,
     normalize_pressed_key_color_mode,
     normalize_visual_glyphs,
 )
@@ -177,6 +177,7 @@ _ANSI16_RGB: Dict[int, Tuple[int, int, int]] = {
 }
 
 _ANSI16_NOTE_COLOR_CODES = (31, 32, 33, 34, 35, 36)
+_ANSI16_THEME_COLOR_CODES = (30, 31, 32, 33, 34, 35, 36, 37)
 
 
 def ansi16_note_sgr(rgb: Tuple[int, int, int], intensity: float, *, background: bool = False) -> str:
@@ -191,6 +192,30 @@ def ansi16_note_sgr(rgb: Tuple[int, int, int], intensity: float, *, background: 
     if background:
         code += 10
     return str(code)
+
+
+def ansi16_theme_sgr(rgb: Tuple[int, int, int], *, background: bool = False) -> str:
+    code = min(
+        _ANSI16_THEME_COLOR_CODES,
+        key=lambda candidate: sum(
+            (int(rgb[idx]) - _ANSI16_RGB[candidate - 30][idx]) ** 2 for idx in range(3)
+        ),
+    )
+    if background:
+        code += 10
+    return str(code)
+
+
+def piano_bg_style(enabled: bool, use_ansi16: bool, rgb: Tuple[int, int, int]) -> str:
+    if use_ansi16:
+        return ansi_color(enabled, ansi16_theme_sgr(rgb, background=True))
+    return ansi_bg_rgb(enabled, rgb)
+
+
+def piano_fg_style(enabled: bool, use_ansi16: bool, rgb: Tuple[int, int, int]) -> str:
+    if use_ansi16:
+        return ansi_color(enabled, ansi16_theme_sgr(rgb))
+    return ansi_fg_rgb(enabled, rgb)
 
 
 def _xterm256_to_rgb(code: int) -> Tuple[int, int, int]:
@@ -425,6 +450,7 @@ def _render_density_frame(
     progress: float,
     track_colors: Optional[Dict[int, Tuple[int, int, int]]],
     note_color_mode: str,
+    piano_color_mode: str,
     pressed_key_color_mode: str,
     dynamics_full_velocity: float,
     terminal_bg_rgb: Optional[Tuple[int, int, int]],
@@ -441,7 +467,8 @@ def _render_density_frame(
     note_velocity = [0] * total_play_cells
     black_fall_mask = bytearray(total_play_cells)
     default_white_note = (255, 80, 80)
-    use_ansi16_notes = normalize_note_color_mode(note_color_mode) == "ansi16"
+    use_ansi16_notes = normalize_color_mode(note_color_mode) == "ansi16"
+    use_ansi16_piano = normalize_color_mode(piano_color_mode) == "ansi16"
     pressed_mode = normalize_pressed_key_color_mode(pressed_key_color_mode)
     term_bg_rgb = terminal_bg_rgb or detect_terminal_bg_rgb()
     full_vel = max(1.0, min(127.0, float(dynamics_full_velocity)))
@@ -740,16 +767,16 @@ def _render_density_frame(
             raw = "".join(canvas[row_idx])
             kb_ry = row_idx - black_start
             for x, ch in enumerate(raw):
-                key_bg = ansi_bg_rgb(use_color, key_bg_rgb[kb_ry][x])
+                key_bg = piano_bg_style(use_color, use_ansi16_piano, key_bg_rgb[kb_ry][x])
                 if ch == "L":
                     fg_rgb = black_key_fg_rgb[kb_ry][x] or (165, 165, 165)
-                    parts.append(ansi_fg_rgb(use_color, fg_rgb) + key_bg + piano_black_left)
+                    parts.append(piano_fg_style(use_color, use_ansi16_piano, fg_rgb) + key_bg + piano_black_left)
                 elif ch == "R":
                     fg_rgb = black_key_fg_rgb[kb_ry][x] or (165, 165, 165)
-                    parts.append(ansi_fg_rgb(use_color, fg_rgb) + key_bg + piano_black_right)
+                    parts.append(piano_fg_style(use_color, use_ansi16_piano, fg_rgb) + key_bg + piano_black_right)
                 elif ch == "P":
                     fg_rgb = black_key_fg_rgb[kb_ry][x] or (165, 165, 165)
-                    parts.append(ansi_fg_rgb(use_color, fg_rgb) + key_bg + piano_black_mid)
+                    parts.append(piano_fg_style(use_color, use_ansi16_piano, fg_rgb) + key_bg + piano_black_mid)
                 elif ch in {"U", "T"}:
                     parts.append(key_bg + " ")
                 elif ch in {piano_black_left, piano_black_right, piano_black_mid}:
@@ -763,7 +790,7 @@ def _render_density_frame(
             kb_ry = row_idx - black_start
             for x, ch in enumerate(raw):
                 if ch in {"G", "W"}:
-                    key_bg = ansi_bg_rgb(use_color, key_bg_rgb[kb_ry][x])
+                    key_bg = piano_bg_style(use_color, use_ansi16_piano, key_bg_rgb[kb_ry][x])
                     parts.append(key_bg + " ")
                 else:
                     parts.append(ch)
@@ -803,6 +830,8 @@ def render_frame(
     progress: float,
     track_colors: Optional[Dict[int, Tuple[int, int, int]]] = None,
     note_color_mode: str = "truecolor",
+    pedal_color_mode: str = "truecolor",
+    piano_color_mode: str = "truecolor",
     pressed_key_color_mode: str = "split",
     dynamics_full_velocity: float = 96.0,
     pedal_opacity_scale: float = 0.5,
@@ -832,6 +861,7 @@ def render_frame(
             progress=progress,
             track_colors=track_colors,
             note_color_mode=note_color_mode,
+            piano_color_mode=piano_color_mode,
             pressed_key_color_mode=pressed_key_color_mode,
             dynamics_full_velocity=dynamics_full_velocity,
             terminal_bg_rgb=terminal_bg_rgb,
@@ -856,7 +886,9 @@ def render_frame(
     measure_line_mask = [[False for _ in range(cols)] for _ in range(play_rows)]
     note_density = [[0 for _ in range(cols)] for _ in range(play_rows)]
     default_white_note = (255, 80, 80)
-    use_ansi16_notes = normalize_note_color_mode(note_color_mode) == "ansi16"
+    use_ansi16_notes = normalize_color_mode(note_color_mode) == "ansi16"
+    use_ansi16_pedals = normalize_color_mode(pedal_color_mode) == "ansi16"
+    use_ansi16_piano = normalize_color_mode(piano_color_mode) == "ansi16"
     pressed_mode = normalize_pressed_key_color_mode(pressed_key_color_mode)
     term_bg_rgb = terminal_bg_rgb or detect_terminal_bg_rgb()
     full_vel = max(1.0, min(127.0, float(dynamics_full_velocity)))
@@ -1522,7 +1554,7 @@ def render_frame(
                     trk = note_track[y][x]
                     vel = note_velocity[y][x]
                     pedal_alpha = pedal_fall_alpha_scale[y][x]
-                    if use_ansi16_notes:
+                    if use_ansi16_pedals:
                         if pedal_black_fall_mask[y][x]:
                             bg_track = white_fall_track[y][x]
                             bg_vel = white_fall_velocity[y][x]
@@ -1590,16 +1622,16 @@ def render_frame(
             raw = "".join(canvas[row_idx])
             kb_ry = row_idx - black_start
             for x, ch in enumerate(raw):
-                key_bg = ansi_bg_rgb(use_color, key_bg_rgb[kb_ry][x])
+                key_bg = piano_bg_style(use_color, use_ansi16_piano, key_bg_rgb[kb_ry][x])
                 if ch == "L":
                     fg_rgb = black_key_fg_rgb[kb_ry][x] or (165, 165, 165)
-                    parts.append(ansi_fg_rgb(use_color, fg_rgb) + key_bg + piano_black_left)
+                    parts.append(piano_fg_style(use_color, use_ansi16_piano, fg_rgb) + key_bg + piano_black_left)
                 elif ch == "R":
                     fg_rgb = black_key_fg_rgb[kb_ry][x] or (165, 165, 165)
-                    parts.append(ansi_fg_rgb(use_color, fg_rgb) + key_bg + piano_black_right)
+                    parts.append(piano_fg_style(use_color, use_ansi16_piano, fg_rgb) + key_bg + piano_black_right)
                 elif ch == "P":
                     fg_rgb = black_key_fg_rgb[kb_ry][x] or (165, 165, 165)
-                    parts.append(ansi_fg_rgb(use_color, fg_rgb) + key_bg + piano_black_mid)
+                    parts.append(piano_fg_style(use_color, use_ansi16_piano, fg_rgb) + key_bg + piano_black_mid)
                 elif ch in {"U", "T"}:
                     parts.append(key_bg + " ")
                 elif ch in {piano_black_left, piano_black_right, piano_black_mid}:
@@ -1613,7 +1645,7 @@ def render_frame(
             kb_ry = row_idx - black_start
             for x, ch in enumerate(raw):
                 if ch in {"G", "W"}:
-                    key_bg = ansi_bg_rgb(use_color, key_bg_rgb[kb_ry][x])
+                    key_bg = piano_bg_style(use_color, use_ansi16_piano, key_bg_rgb[kb_ry][x])
                     parts.append(key_bg + " ")
                 else:
                     parts.append(ch)

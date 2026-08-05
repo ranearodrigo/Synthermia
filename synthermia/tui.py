@@ -43,7 +43,7 @@ from synthermia.config import (
     format_live_instrument_map,
     load_config_profiles,
     load_last_config,
-    normalize_note_color_mode,
+    normalize_color_mode,
     normalize_pressed_key_color_mode,
     normalize_note_range_text,
     parse_live_color_map,
@@ -437,6 +437,9 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         initial_drop_speed = saved_scroll
     else:
         initial_drop_speed = float(args.drop_speed)
+    saved_note_color_mode = normalize_color_mode(
+        str(saved.get("note_color_mode", getattr(args, "note_color_mode", "truecolor")))
+    )
 
     state: Dict[str, object] = {
         "midi_input_mode": bool(saved.get("midi_input_mode", getattr(args, "midi_input_mode", False))),
@@ -480,9 +483,14 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             saved.get("dynamics_full_velocity", getattr(args, "dynamics_full_velocity", 96.0))
         ),
         "terminal_bg_color": str(saved.get("terminal_bg_color", getattr(args, "terminal_bg_color", ""))),
-        "note_color_mode": normalize_note_color_mode(
-            str(saved.get("note_color_mode", getattr(args, "note_color_mode", "truecolor")))
+        "note_color_mode": saved_note_color_mode,
+        "pedal_color_mode": normalize_color_mode(
+            str(saved.get("pedal_color_mode", saved_note_color_mode))
         ),
+        "piano_color_mode": normalize_color_mode(
+            str(saved.get("piano_color_mode", getattr(args, "piano_color_mode", "truecolor")))
+        ),
+        "color_rendering": "",
         "glyph_note_white": _sanitize_visual_glyph(
             saved.get("glyph_note_white", getattr(args, "glyph_note_white", DEFAULT_VISUAL_GLYPHS["glyph_note_white"])),
             DEFAULT_VISUAL_GLYPHS["glyph_note_white"],
@@ -666,13 +674,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             "section": "Visual",
         },
         {"key": "terminal_bg_color", "label": "Terminal BG (R,G,B)", "type": "text", "section": "Visual"},
-        {
-            "key": "note_color_mode",
-            "label": "Note Color Mode",
-            "type": "choice",
-            "options": ["truecolor", "ansi16"],
-            "section": "Visual",
-        },
+        {"key": "color_rendering", "label": "Color Rendering", "type": "color_rendering_editor", "section": "Visual"},
         {"key": "glyph_editor", "label": "Glyphs", "type": "glyph_editor", "section": "Visual"},
         {"key": "pedal_visual_dots", "label": "Pedal Hold Dots", "type": "bool", "section": "Visual"},
         {"key": "disable_pedal", "label": "Disable Pedal Playback", "type": "bool", "section": "Playback"},
@@ -775,7 +777,9 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             "kb_black_extra": int(state["kb_black_extra"]),
             "dynamics_full_velocity": float(state["dynamics_full_velocity"]),
             "terminal_bg_color": str(state["terminal_bg_color"]).strip(),
-            "note_color_mode": normalize_note_color_mode(str(state["note_color_mode"])),
+            "note_color_mode": normalize_color_mode(str(state["note_color_mode"])),
+            "pedal_color_mode": normalize_color_mode(str(state["pedal_color_mode"])),
+            "piano_color_mode": normalize_color_mode(str(state["piano_color_mode"])),
             "glyph_note_white": _sanitize_visual_glyph(state["glyph_note_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_white"]),
             "glyph_note_pedal_white": _sanitize_visual_glyph(
                 state["glyph_note_pedal_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_white"]
@@ -1157,6 +1161,11 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                 total_txt = "?"
             total = total_txt
             return f"{total} tracks  inst:{inst_overrides}  color:{color_overrides}  vol:{vol_overrides}"
+        if t == "color_rendering_editor":
+            return (
+                f"Notes:{state['note_color_mode']}  "
+                f"Pedals:{state['pedal_color_mode']}  Piano:{state['piano_color_mode']}"
+            )
         if t == "glyph_editor":
             return (
                 f"N:{state['glyph_note_white']}/{state['glyph_note_black_left']}{state['glyph_note_black_mid']}{state['glyph_note_black_right']} "
@@ -2720,6 +2729,45 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                     status_msg = "No change."
                 continue
 
+    def choose_color_rendering(stdscr: "curses._CursesWindow") -> Optional[Dict[str, str]]:
+        items = [
+            ("note_color_mode", "Notes"),
+            ("pedal_color_mode", "Pedal Tails"),
+            ("piano_color_mode", "Piano"),
+        ]
+        modes = {key: normalize_color_mode(str(state[key])) for key, _label in items}
+        selected = 0
+        while True:
+            stdscr.erase()
+            h, w = stdscr.getmaxyx()
+            stdscr.box()
+            title = " Color Rendering "
+            stdscr.addstr(0, max(2, (w - len(title)) // 2), title, curses.A_BOLD)
+            help_line = "Up/Down move  Left/Right or Enter change  s save  Esc cancel"
+            stdscr.addstr(1, 2, help_line[: max(1, w - 4)])
+            stdscr.addstr(3, 2, "ANSI-16 uses your terminal theme palette."[: max(1, w - 4)], curses.A_DIM)
+            for idx, (key, label) in enumerate(items):
+                line = f"{label:<16} {modes[key]}"
+                attr = curses.A_REVERSE if idx == selected else curses.A_NORMAL
+                stdscr.addstr(5 + idx, 2, line[: max(1, w - 4)], attr)
+            stdscr.refresh()
+
+            k = stdscr.getch()
+            if k in (27, ord("q"), ord("Q")):
+                return None
+            if k == curses.KEY_UP:
+                selected = (selected - 1) % len(items)
+                continue
+            if k == curses.KEY_DOWN:
+                selected = (selected + 1) % len(items)
+                continue
+            if k in (curses.KEY_LEFT, curses.KEY_RIGHT, 10, 13, curses.KEY_ENTER):
+                key, _label = items[selected]
+                modes[key] = "ansi16" if modes[key] == "truecolor" else "truecolor"
+                continue
+            if k in (ord("s"), ord("S")):
+                return modes
+
     def apply_field_action(stdscr: "curses._CursesWindow", idx: int, direction: int) -> Optional[str]:
         nonlocal profile_selection
         field = fields[idx]
@@ -2907,6 +2955,14 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             if direction != 0:
                 return None
             if choose_glyph_editor(stdscr):
+                persist_state()
+        elif t == "color_rendering_editor":
+            if direction != 0:
+                return None
+            modes = choose_color_rendering(stdscr)
+            if modes is not None:
+                for mode_key, mode_value in modes.items():
+                    state[mode_key] = normalize_color_mode(mode_value)
                 persist_state()
         elif t == "offpiano_pattern_editor":
             if direction != 0:
@@ -3212,7 +3268,9 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
     args.kb_black_extra = int(state["kb_black_extra"])
     args.dynamics_full_velocity = float(state["dynamics_full_velocity"])
     args.terminal_bg_color = str(state["terminal_bg_color"]).strip()
-    args.note_color_mode = normalize_note_color_mode(str(state["note_color_mode"]))
+    args.note_color_mode = normalize_color_mode(str(state["note_color_mode"]))
+    args.pedal_color_mode = normalize_color_mode(str(state["pedal_color_mode"]))
+    args.piano_color_mode = normalize_color_mode(str(state["piano_color_mode"]))
     args.glyph_note_white = _sanitize_visual_glyph(state["glyph_note_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_white"])
     args.glyph_note_pedal_white = _sanitize_visual_glyph(
         state["glyph_note_pedal_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_white"]
