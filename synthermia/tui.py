@@ -2921,8 +2921,11 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         return None
 
     collapsed_sections: set[str] = set()
+    search_text = ""
+    search_editing = False
 
     def build_menu_items() -> List[Dict[str, object]]:
+        needle = search_text.casefold()
         section_order: List[str] = []
         section_fields: Dict[str, List[int]] = {}
         for field_idx, field in enumerate(fields):
@@ -2933,7 +2936,19 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             section_fields[section].append(field_idx)
         items: List[Dict[str, object]] = []
         for section in section_order:
-            count = len(section_fields[section])
+            field_indices = section_fields[section]
+            section_matches = bool(needle) and needle in section.casefold()
+            visible_field_indices = [
+                field_idx
+                for field_idx in field_indices
+                if not needle
+                or section_matches
+                or needle in str(fields[field_idx]["key"]).casefold()
+                or needle in str(fields[field_idx]["label"]).casefold()
+            ]
+            if needle and not visible_field_indices:
+                continue
+            count = len(field_indices)
             if section == "Profile":
                 count = len(profile_entries)
             items.append(
@@ -2943,10 +2958,12 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                     "count": count,
                 }
             )
-            if section in collapsed_sections:
+            if section in collapsed_sections and not needle:
                 continue
-            for field_idx in section_fields[section]:
+            for field_idx in visible_field_indices:
                 items.append({"kind": "field", "field_idx": field_idx})
+        if needle and not items:
+            items.append({"kind": "empty"})
         return items
 
     def draw(
@@ -2960,9 +2977,11 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         stdscr.box()
         title = " Synthermia Config "
         stdscr.addstr(0, max(2, (w - len(title)) // 2), title, curses.A_BOLD)
-        help_line = "Arrows: navigate  Enter: edit/toggle  PgUp/PgDn: page  q: quit"
+        help_line = "Arrows: navigate  Enter: edit/toggle  /: search  p: play  q: quit"
         stdscr.addstr(1, 2, help_line[: max(1, w - 4)])
-        stdscr.addstr(2, 2, "Enter on section headers collapses/expands that category."[: max(1, w - 4)])
+        search_value = f"{search_text}_" if search_editing else (search_text or "<all>")
+        search_help = "Esc clears" if search_text else "Enter on sections collapses/expands"
+        stdscr.addstr(2, 2, f"Search: {search_value}  {search_help}"[: max(1, w - 4)])
         list_top = 4
         list_h = max(1, h - list_top - 1)
         total = len(menu_items)
@@ -2997,6 +3016,9 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                 attr = curses.A_REVERSE | curses.A_BOLD if menu_idx == selected_idx else curses.A_BOLD
                 stdscr.addstr(y, 2, line[: max(1, w - 4)], attr)
                 continue
+            if kind == "empty":
+                stdscr.addstr(y, 2, "  (no settings match)"[: max(1, w - 4)], curses.A_DIM)
+                continue
 
             field_idx = int(item.get("field_idx", 0))
             field = fields[field_idx]
@@ -3017,6 +3039,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
         return scroll_top, list_h
 
     def tui(stdscr: "curses._CursesWindow") -> bool:
+        nonlocal search_editing, search_text
         curses.curs_set(0)
         if curses.has_colors():
             try:
@@ -3037,8 +3060,42 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             selected_idx = max(0, min(selected_idx, len(menu_items) - 1))
             scroll_top, list_h = draw(stdscr, menu_items, selected_idx, scroll_top)
             k = stdscr.getch()
+            if search_editing:
+                if k in (10, 13, curses.KEY_ENTER):
+                    search_editing = False
+                    continue
+                if k == 27:
+                    search_text = ""
+                    search_editing = False
+                    selected_idx = 0
+                    scroll_top = 0
+                    continue
+                if k in (curses.KEY_BACKSPACE, 127, 8):
+                    search_text = search_text[:-1]
+                    selected_idx = 0
+                    scroll_top = 0
+                    continue
+                if 32 <= k <= 126:
+                    search_text += chr(k)
+                    selected_idx = 0
+                    scroll_top = 0
+                continue
             if k in (ord("q"), ord("Q")):
                 return False
+            if k == ord("/"):
+                search_text = ""
+                search_editing = True
+                selected_idx = 0
+                scroll_top = 0
+                continue
+            if k == 27 and search_text:
+                search_text = ""
+                selected_idx = 0
+                scroll_top = 0
+                continue
+            if k in (ord("p"), ord("P")):
+                persist_state()
+                return True
             if k in (curses.KEY_UP,):
                 selected_idx = (selected_idx - 1) % len(menu_items)
                 continue
@@ -3058,7 +3115,10 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                 selected_idx = len(menu_items) - 1
                 continue
             item = menu_items[selected_idx]
-            if str(item.get("kind", "")) == "section":
+            kind = str(item.get("kind", ""))
+            if kind == "empty":
+                continue
+            if kind == "section":
                 section = str(item.get("section", "General"))
                 if k in (10, 13, curses.KEY_ENTER):
                     if section in collapsed_sections:
