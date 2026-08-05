@@ -673,7 +673,6 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             "min": 1.0,
             "section": "Visual",
         },
-        {"key": "terminal_bg_color", "label": "Terminal BG (R,G,B)", "type": "text", "section": "Visual"},
         {"key": "color_rendering", "label": "Color Rendering", "type": "color_rendering_editor", "section": "Visual"},
         {"key": "glyph_editor", "label": "Glyphs", "type": "glyph_editor", "section": "Visual"},
         {"key": "pedal_visual_dots", "label": "Pedal Hold Dots", "type": "bool", "section": "Visual"},
@@ -2734,8 +2733,14 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             ("note_color_mode", "Notes"),
             ("pedal_color_mode", "Pedal Tails"),
             ("piano_color_mode", "Piano"),
+            ("terminal_bg_color", "Terminal BG"),
         ]
-        modes = {key: normalize_color_mode(str(state[key])) for key, _label in items}
+        values = {
+            "note_color_mode": normalize_color_mode(str(state["note_color_mode"])),
+            "pedal_color_mode": normalize_color_mode(str(state["pedal_color_mode"])),
+            "piano_color_mode": normalize_color_mode(str(state["piano_color_mode"])),
+            "terminal_bg_color": str(state["terminal_bg_color"]).strip(),
+        }
         selected = 0
         while True:
             stdscr.erase()
@@ -2743,11 +2748,14 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             stdscr.box()
             title = " Color Rendering "
             stdscr.addstr(0, max(2, (w - len(title)) // 2), title, curses.A_BOLD)
-            help_line = "Up/Down move  Left/Right or Enter change  s save  Esc cancel"
+            help_line = "Up/Down move  Left/Right change colors  Enter change/edit  s save  Esc cancel"
             stdscr.addstr(1, 2, help_line[: max(1, w - 4)])
             stdscr.addstr(3, 2, "ANSI-16 uses your terminal theme palette."[: max(1, w - 4)], curses.A_DIM)
             for idx, (key, label) in enumerate(items):
-                line = f"{label:<16} {modes[key]}"
+                value = values[key]
+                if key == "terminal_bg_color" and not value:
+                    value = "auto"
+                line = f"{label:<16} {value}"
                 attr = curses.A_REVERSE if idx == selected else curses.A_NORMAL
                 stdscr.addstr(5 + idx, 2, line[: max(1, w - 4)], attr)
             stdscr.refresh()
@@ -2761,12 +2769,20 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             if k == curses.KEY_DOWN:
                 selected = (selected + 1) % len(items)
                 continue
-            if k in (curses.KEY_LEFT, curses.KEY_RIGHT, 10, 13, curses.KEY_ENTER):
+            if k in (curses.KEY_LEFT, curses.KEY_RIGHT):
                 key, _label = items[selected]
-                modes[key] = "ansi16" if modes[key] == "truecolor" else "truecolor"
+                if key != "terminal_bg_color":
+                    values[key] = "ansi16" if values[key] == "truecolor" else "truecolor"
+                continue
+            if k in (10, 13, curses.KEY_ENTER):
+                key, _label = items[selected]
+                if key == "terminal_bg_color":
+                    values[key] = _edit_text_popup(stdscr, "Terminal BG (R,G,B; blank=auto)", values[key]).strip()
+                else:
+                    values[key] = "ansi16" if values[key] == "truecolor" else "truecolor"
                 continue
             if k in (ord("s"), ord("S")):
-                return modes
+                return values
 
     def apply_field_action(stdscr: "curses._CursesWindow", idx: int, direction: int) -> Optional[str]:
         nonlocal profile_selection
@@ -2962,7 +2978,10 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             modes = choose_color_rendering(stdscr)
             if modes is not None:
                 for mode_key, mode_value in modes.items():
-                    state[mode_key] = normalize_color_mode(mode_value)
+                    if mode_key == "terminal_bg_color":
+                        state[mode_key] = mode_value.strip()
+                    else:
+                        state[mode_key] = normalize_color_mode(mode_value)
                 persist_state()
         elif t == "offpiano_pattern_editor":
             if direction != 0:

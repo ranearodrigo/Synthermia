@@ -91,8 +91,7 @@ Settings are persisted to `.synthermia_last_config.json` and restored on next la
 - Instrument picker demos (`d`) in every instrument selector (main, track, live-map)
 - Auto-match MIDI track names/instrument names to SoundFont presets using fuzzy similarity
 - Keyboard scaling controls (`rows`, `x_scale`, keyboard Y scale, black key extra rows)
-- Automatic terminal-background detection, including the active Kitty theme when `Terminal BG` is left on `auto`
-- Color Rendering lets notes, pedal tails, and piano keys independently use truecolor or the terminal theme's ANSI-16 palette
+- Color Rendering lets notes, pedal tails, and piano keys independently use truecolor or the terminal theme's ANSI-16 palette, and configures the automatic or custom terminal background
 - Off-piano ornamental background with toggle to plain background
 - Pressed-key color modes: `split` (splits the key between multiple colors), `weighted` (calculates an average color), `off`
 - SoundFont playback with two engines: Python in-process (`pyFluidSynth`) and CLI (`fluidsynth` subprocess)
