@@ -43,6 +43,7 @@ from synthermia.config import (
     format_live_instrument_map,
     load_config_profiles,
     load_last_config,
+    normalize_note_color_mode,
     normalize_pressed_key_color_mode,
     normalize_note_range_text,
     parse_live_color_map,
@@ -475,6 +476,9 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             saved.get("dynamics_full_velocity", getattr(args, "dynamics_full_velocity", 96.0))
         ),
         "terminal_bg_color": str(saved.get("terminal_bg_color", getattr(args, "terminal_bg_color", ""))),
+        "note_color_mode": normalize_note_color_mode(
+            str(saved.get("note_color_mode", getattr(args, "note_color_mode", "truecolor")))
+        ),
         "glyph_note_white": _sanitize_visual_glyph(
             saved.get("glyph_note_white", getattr(args, "glyph_note_white", DEFAULT_VISUAL_GLYPHS["glyph_note_white"])),
             DEFAULT_VISUAL_GLYPHS["glyph_note_white"],
@@ -658,6 +662,13 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             "section": "Visual",
         },
         {"key": "terminal_bg_color", "label": "Terminal BG (R,G,B)", "type": "text", "section": "Visual"},
+        {
+            "key": "note_color_mode",
+            "label": "Note Color Mode",
+            "type": "choice",
+            "options": ["truecolor", "ansi16"],
+            "section": "Visual",
+        },
         {"key": "glyph_editor", "label": "Glyphs", "type": "glyph_editor", "section": "Visual"},
         {"key": "pedal_visual_dots", "label": "Pedal Hold Dots", "type": "bool", "section": "Visual"},
         {"key": "disable_pedal", "label": "Disable Pedal Playback", "type": "bool", "section": "Playback"},
@@ -760,6 +771,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             "kb_black_extra": int(state["kb_black_extra"]),
             "dynamics_full_velocity": float(state["dynamics_full_velocity"]),
             "terminal_bg_color": str(state["terminal_bg_color"]).strip(),
+            "note_color_mode": normalize_note_color_mode(str(state["note_color_mode"])),
             "glyph_note_white": _sanitize_visual_glyph(state["glyph_note_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_white"]),
             "glyph_note_pedal_white": _sanitize_visual_glyph(
                 state["glyph_note_pedal_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_white"]
@@ -3128,6 +3140,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
     args.kb_black_extra = int(state["kb_black_extra"])
     args.dynamics_full_velocity = float(state["dynamics_full_velocity"])
     args.terminal_bg_color = str(state["terminal_bg_color"]).strip()
+    args.note_color_mode = normalize_note_color_mode(str(state["note_color_mode"]))
     args.glyph_note_white = _sanitize_visual_glyph(state["glyph_note_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_white"])
     args.glyph_note_pedal_white = _sanitize_visual_glyph(
         state["glyph_note_pedal_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_white"]

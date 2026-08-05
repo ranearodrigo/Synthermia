@@ -14,6 +14,7 @@ from functools import lru_cache
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from synthermia.config import (
+    normalize_note_color_mode,
     normalize_pressed_key_color_mode,
     normalize_visual_glyphs,
 )
@@ -174,6 +175,22 @@ _ANSI16_RGB: Dict[int, Tuple[int, int, int]] = {
     8: (127, 127, 127), 9: (255, 0, 0), 10: (0, 255, 0), 11: (255, 255, 0),
     12: (92, 92, 255), 13: (255, 0, 255), 14: (0, 255, 255), 15: (255, 255, 255),
 }
+
+_ANSI16_NOTE_COLOR_CODES = (31, 32, 33, 34, 35, 36)
+
+
+def ansi16_note_sgr(rgb: Tuple[int, int, int], intensity: float, *, background: bool = False) -> str:
+    code = min(
+        _ANSI16_NOTE_COLOR_CODES,
+        key=lambda candidate: sum(
+            (int(rgb[idx]) - _ANSI16_RGB[candidate - 30][idx]) ** 2 for idx in range(3)
+        ),
+    )
+    if float(intensity) >= 0.5:
+        code += 60
+    if background:
+        code += 10
+    return str(code)
 
 
 def _xterm256_to_rgb(code: int) -> Tuple[int, int, int]:
@@ -407,6 +424,7 @@ def _render_density_frame(
     title: str,
     progress: float,
     track_colors: Optional[Dict[int, Tuple[int, int, int]]],
+    note_color_mode: str,
     pressed_key_color_mode: str,
     dynamics_full_velocity: float,
     terminal_bg_rgb: Optional[Tuple[int, int, int]],
@@ -423,6 +441,7 @@ def _render_density_frame(
     note_velocity = [0] * total_play_cells
     black_fall_mask = bytearray(total_play_cells)
     default_white_note = (255, 80, 80)
+    use_ansi16_notes = normalize_note_color_mode(note_color_mode) == "ansi16"
     pressed_mode = normalize_pressed_key_color_mode(pressed_key_color_mode)
     term_bg_rgb = terminal_bg_rgb or detect_terminal_bg_rgb()
     full_vel = max(1.0, min(127.0, float(dynamics_full_velocity)))
@@ -671,6 +690,10 @@ def _render_density_frame(
         palette_cache[key] = (white_rgb, dark_rgb)
         return white_rgb, dark_rgb
 
+    def note_ansi_fg(track_idx: int, velocity: int) -> str:
+        intensity = velocity_color_alpha(int(velocity), full_vel)
+        return ansi_color(use_color, ansi16_note_sgr(track_white_rgb(track_idx), intensity))
+
     for y in range(play_rows):
         raw = "".join(canvas[y])
         if use_color:
@@ -683,12 +706,18 @@ def _render_density_frame(
                 trk = note_track[idx]
                 if black_fall_mask[idx]:
                     vel = note_velocity[idx]
-                    _white_rgb, dark_rgb = track_palette(trk, vel)
-                    style = ansi_fg_rgb(use_color, dark_rgb) + clear_bg
+                    if use_ansi16_notes:
+                        style = note_ansi_fg(trk, vel) + clear_bg
+                    else:
+                        _white_rgb, dark_rgb = track_palette(trk, vel)
+                        style = ansi_fg_rgb(use_color, dark_rgb) + clear_bg
                 elif trk >= 0:
                     vel = note_velocity[idx]
-                    white_rgb, _dark_rgb = track_palette(trk, vel)
-                    style = ansi_fg_rgb(use_color, white_rgb) + clear_bg
+                    if use_ansi16_notes:
+                        style = note_ansi_fg(trk, vel) + clear_bg
+                    else:
+                        white_rgb, _dark_rgb = track_palette(trk, vel)
+                        style = ansi_fg_rgb(use_color, white_rgb) + clear_bg
                 elif y in measure_rows and ch == "_":
                     style = ansi_fg_rgb(use_color, (130, 130, 130)) + clear_bg
                 else:
@@ -773,6 +802,7 @@ def render_frame(
     title: str,
     progress: float,
     track_colors: Optional[Dict[int, Tuple[int, int, int]]] = None,
+    note_color_mode: str = "truecolor",
     pressed_key_color_mode: str = "split",
     dynamics_full_velocity: float = 96.0,
     pedal_opacity_scale: float = 0.5,
@@ -801,6 +831,7 @@ def render_frame(
             title=title,
             progress=progress,
             track_colors=track_colors,
+            note_color_mode=note_color_mode,
             pressed_key_color_mode=pressed_key_color_mode,
             dynamics_full_velocity=dynamics_full_velocity,
             terminal_bg_rgb=terminal_bg_rgb,
@@ -825,6 +856,7 @@ def render_frame(
     measure_line_mask = [[False for _ in range(cols)] for _ in range(play_rows)]
     note_density = [[0 for _ in range(cols)] for _ in range(play_rows)]
     default_white_note = (255, 80, 80)
+    use_ansi16_notes = normalize_note_color_mode(note_color_mode) == "ansi16"
     pressed_mode = normalize_pressed_key_color_mode(pressed_key_color_mode)
     term_bg_rgb = terminal_bg_rgb or detect_terminal_bg_rgb()
     full_vel = max(1.0, min(127.0, float(dynamics_full_velocity)))
@@ -1471,6 +1503,14 @@ def render_frame(
         palette_cache[key] = (white_rgb, dark_rgb)
         return white_rgb, dark_rgb
 
+    def note_ansi_fg(track_idx: int, velocity: int, alpha_scale: float = 1.0) -> str:
+        intensity = velocity_color_alpha(int(velocity), full_vel) * max(0.0, min(1.0, float(alpha_scale)))
+        return ansi_color(use_color, ansi16_note_sgr(track_white_rgb(track_idx), intensity))
+
+    def note_ansi_bg(track_idx: int, velocity: int, alpha_scale: float = 1.0) -> str:
+        intensity = velocity_color_alpha(int(velocity), full_vel) * max(0.0, min(1.0, float(alpha_scale)))
+        return ansi_color(use_color, ansi16_note_sgr(track_white_rgb(track_idx), intensity, background=True))
+
     for y in range(play_rows):
         raw = "".join(canvas[y])
         if use_color:
@@ -1482,33 +1522,52 @@ def render_frame(
                     trk = note_track[y][x]
                     vel = note_velocity[y][x]
                     pedal_alpha = pedal_fall_alpha_scale[y][x]
-                    white_rgb, dark_rgb = track_palette(trk, vel, pedal_alpha)
-                    if pedal_black_fall_mask[y][x]:
-                        bg_track = white_fall_track[y][x]
-                        bg_vel = white_fall_velocity[y][x]
-                        bg_alpha = white_fall_alpha_scale[y][x]
+                    if use_ansi16_notes:
+                        if pedal_black_fall_mask[y][x]:
+                            bg_track = white_fall_track[y][x]
+                            bg_vel = white_fall_velocity[y][x]
+                            bg_alpha = white_fall_alpha_scale[y][x]
+                            style = note_ansi_fg(trk, vel, pedal_alpha) + (
+                                note_ansi_bg(bg_track, bg_vel, bg_alpha) if bg_track >= 0 else clear_bg
+                            )
+                        else:
+                            style = note_ansi_fg(trk, vel, pedal_alpha) + clear_bg
+                    else:
+                        white_rgb, dark_rgb = track_palette(trk, vel, pedal_alpha)
+                        if pedal_black_fall_mask[y][x]:
+                            bg_track = white_fall_track[y][x]
+                            bg_vel = white_fall_velocity[y][x]
+                            bg_alpha = white_fall_alpha_scale[y][x]
+                            bg_rgb = track_palette(bg_track, bg_vel, bg_alpha)[0] if bg_track >= 0 else None
+                            style = ansi_fg_rgb(use_color, dark_rgb) + (
+                                ansi_bg_rgb(use_color, bg_rgb) if bg_rgb else clear_bg
+                            )
+                        else:
+                            style = ansi_fg_rgb(use_color, white_rgb) + clear_bg
+                elif black_fall_mask[y][x]:
+                    trk = note_track[y][x]
+                    vel = note_velocity[y][x]
+                    bg_track = white_fall_track[y][x]
+                    bg_vel = white_fall_velocity[y][x]
+                    bg_alpha = white_fall_alpha_scale[y][x]
+                    if use_ansi16_notes:
+                        style = note_ansi_fg(trk, vel) + (
+                            note_ansi_bg(bg_track, bg_vel, bg_alpha) if bg_track >= 0 else clear_bg
+                        )
+                    else:
+                        _white_rgb, dark_rgb = track_palette(trk, vel)
                         bg_rgb = track_palette(bg_track, bg_vel, bg_alpha)[0] if bg_track >= 0 else None
                         style = ansi_fg_rgb(use_color, dark_rgb) + (
                             ansi_bg_rgb(use_color, bg_rgb) if bg_rgb else clear_bg
                         )
-                    else:
-                        style = ansi_fg_rgb(use_color, white_rgb) + clear_bg
-                elif black_fall_mask[y][x]:
-                    trk = note_track[y][x]
-                    vel = note_velocity[y][x]
-                    _white_rgb, dark_rgb = track_palette(trk, vel)
-                    bg_track = white_fall_track[y][x]
-                    bg_vel = white_fall_velocity[y][x]
-                    bg_alpha = white_fall_alpha_scale[y][x]
-                    bg_rgb = track_palette(bg_track, bg_vel, bg_alpha)[0] if bg_track >= 0 else None
-                    style = ansi_fg_rgb(use_color, dark_rgb) + (
-                        ansi_bg_rgb(use_color, bg_rgb) if bg_rgb else clear_bg
-                    )
                 elif note_track[y][x] >= 0:
                     trk = note_track[y][x]
                     vel = note_velocity[y][x]
-                    white_rgb, _dark_rgb = track_palette(trk, vel)
-                    style = ansi_fg_rgb(use_color, white_rgb) + clear_bg
+                    if use_ansi16_notes:
+                        style = note_ansi_fg(trk, vel) + clear_bg
+                    else:
+                        white_rgb, _dark_rgb = track_palette(trk, vel)
+                        style = ansi_fg_rgb(use_color, white_rgb) + clear_bg
                 elif measure_line_mask[y][x]:
                     style = ansi_fg_rgb(use_color, (130, 130, 130)) + clear_bg
                 else:
