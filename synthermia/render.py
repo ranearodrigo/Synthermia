@@ -7,6 +7,7 @@ import os
 import re
 import select
 import sys
+import termios
 import time
 from bisect import bisect_left
 from functools import lru_cache
@@ -192,8 +193,76 @@ def _xterm256_to_rgb(code: int) -> Tuple[int, int, int]:
     return _ANSI16_RGB[0]
 
 
+def _is_kitty_terminal() -> bool:
+    return "kitty" in str(os.environ.get("TERM", "")).lower() or bool(os.environ.get("KITTY_WINDOW_ID"))
+
+
+def _parse_osc_rgb_response(response: bytes) -> Optional[Tuple[int, int, int]]:
+    match = re.search(rb"\x1b\]11;rgb:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+)", response)
+    if match is None:
+        return None
+
+    rgb: List[int] = []
+    for component in match.groups():
+        value = int(component, 16)
+        max_value = (1 << (4 * len(component))) - 1
+        rgb.append(int(round((value * 255) / max_value)))
+    return (rgb[0], rgb[1], rgb[2])
+
+
+def _query_kitty_bg_rgb() -> Optional[Tuple[int, int, int]]:
+    if not _is_kitty_terminal():
+        return None
+
+    try:
+        tty_fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    except OSError:
+        return None
+
+    old_attrs = None
+    try:
+        old_attrs = termios.tcgetattr(tty_fd)
+        query_attrs = termios.tcgetattr(tty_fd)
+        query_attrs[3] &= ~(termios.ICANON | termios.ECHO)
+        query_attrs[6][termios.VMIN] = 0
+        query_attrs[6][termios.VTIME] = 0
+        termios.tcsetattr(tty_fd, termios.TCSANOW, query_attrs)
+        os.write(tty_fd, b"\x1b]11;?\x07")
+
+        response = bytearray()
+        deadline = time.monotonic() + 0.15
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([tty_fd], [], [], max(0.0, deadline - time.monotonic()))
+            if not ready:
+                break
+            try:
+                chunk = os.read(tty_fd, 1024)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                break
+            response.extend(chunk)
+            parsed = _parse_osc_rgb_response(bytes(response))
+            if parsed is not None:
+                return parsed
+    except (OSError, termios.error):
+        return None
+    finally:
+        if old_attrs is not None:
+            try:
+                termios.tcsetattr(tty_fd, termios.TCSANOW, old_attrs)
+            except termios.error:
+                pass
+        os.close(tty_fd)
+    return None
+
+
 @lru_cache(maxsize=1)
 def detect_terminal_bg_rgb() -> Tuple[int, int, int]:
+    kitty_rgb = _query_kitty_bg_rgb()
+    if kitty_rgb is not None:
+        return kitty_rgb
+
     # COLORFGBG commonly exposes foreground;background color indexes.
     raw = str(os.environ.get("COLORFGBG", "")).strip()
     if not raw:
