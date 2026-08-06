@@ -31,7 +31,7 @@ Optional (native packed playback acceleration for very large MIDIs):
 - `maturin` for local extension builds
 
 Optional (desktop/headphone media controls):
-- System DBus Python bindings (`python3-dbus` and `python3-gi` on many Linux distributions)
+- A Linux desktop session with a D-Bus session bus
 
 ## Quick Start
 
@@ -115,7 +115,7 @@ Standard playback:
 - `Up` / `Down`: audio gain
 - `q`: quit
 
-When the optional DBus bindings are installed, desktop/headphone media controls provide the same pause, seek, and volume actions.
+On a Linux desktop session, Synthermia publishes MPRIS media controls for pause, seek, and volume.
 
 Live input mode:
 - `s`: save captured MIDI

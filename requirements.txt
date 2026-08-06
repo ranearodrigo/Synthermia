@@ -1,5 +1,3 @@
 maturin>=1.7,<2.0
 pyfluidsynth
-
-# Optional desktop/headphone media controls use system DBus bindings
-# (`python3-dbus` and `python3-gi` on many distros), not a pip package here.
+dbus-next>=0.2.3
