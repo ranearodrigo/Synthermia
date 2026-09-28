@@ -303,6 +303,7 @@ def run_background_task_popup(
         return "  ".join(detail_parts)
 
     def tui(stdscr: "curses._CursesWindow") -> None:
+        curses.set_escdelay(50)
         curses.curs_set(0)
         try:
             stdscr.nodelay(True)
@@ -3219,6 +3220,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
 
     def tui(stdscr: "curses._CursesWindow") -> bool:
         nonlocal search_editing, search_text
+        curses.set_escdelay(50)
         curses.curs_set(0)
         if curses.has_colors():
             try:
