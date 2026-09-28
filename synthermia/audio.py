@@ -26,10 +26,7 @@ from synthermia.config import (
     _normalize_saved_track_map,
     _normalize_saved_track_volume_map,
     _clamp_track_volume,
-    default_ansi16_track_color,
-    default_track_color,
 )
-from synthermia.render import parse_rgb_triplet
 
 
 _PW_INIT_DONE = False
@@ -217,36 +214,6 @@ def _build_track_program_map_for_tracks(
         else:
             b, p = _pick_pair_for_sf(default_sf_key, (default_bank, default_prog))
             out[tr] = (default_sf, b, p)
-    return out
-
-
-def _build_track_color_map(
-    spans: Sequence[NoteSpan],
-    track_colors_raw: object,
-) -> Dict[int, Tuple[int, int, int]]:
-    tracks = sorted({int(getattr(sp, "track", 0)) for sp in spans})
-    return _build_track_color_map_for_tracks(tracks, track_colors_raw)
-
-
-def _build_track_color_map_for_tracks(
-    tracks: Sequence[int],
-    track_colors_raw: object,
-    track_color_mode: str = "truecolor",
-) -> Dict[int, Tuple[int, int, int]]:
-    overrides = _normalize_saved_track_map(track_colors_raw)
-    out: Dict[int, Tuple[int, int, int]] = {}
-    ordered_tracks = sorted({int(track) for track in tracks})
-    for i, tr in enumerate(ordered_tracks):
-        default_rgb = (
-            default_ansi16_track_color(i)
-            if str(track_color_mode).strip().lower() == "ansi16"
-            else default_track_color(i, len(tracks))
-        )
-        override_txt = overrides.get(str(tr))
-        if override_txt:
-            out[tr] = parse_rgb_triplet(override_txt, default_rgb)
-        else:
-            out[tr] = default_rgb
     return out
 
 

@@ -760,7 +760,11 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
             "midi_input_color_map": str(state["midi_input_color_map"]),
             "midi": str(state["midi"]),
             "soundfont": str(state["soundfont"]),
-            "soundfonts": list(_normalize_saved_soundfont_library(state.get("soundfonts", []))),
+            "soundfonts": list(
+                _normalize_saved_soundfont_library(
+                    state.get("soundfonts", []), primary_soundfont=str(state["soundfont"])
+                )
+            ),
             "instrument": str(state["instrument"]),
             "instrument_bank": inst_bank,
             "instrument_program": inst_prog,
@@ -3348,95 +3352,9 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
     accepted = curses.wrapper(tui)
     if not accepted:
         raise KeyboardInterrupt()
-    clamp_playback_fields()
-
-    args.midi_input_mode = bool(state["midi_input_mode"])
-    args.midi_input_port = str(state["midi_input_port"])
-    args.midi_input_save_dir = str(state["midi_input_save_dir"])
-    args.midi_input_invert_pedal = bool(state["midi_input_invert_pedal"])
-    args.midi_input_instrument_map = str(state["midi_input_instrument_map"])
-    args.midi_input_color_map = str(state["midi_input_color_map"])
-    args.midi = str(state["midi"])
-    args.soundfont = str(state["soundfont"])
-    args.soundfonts = list(_normalize_saved_soundfont_library(state.get("soundfonts", []), primary_soundfont=args.soundfont))
-    args.audio_engine = str(state["audio_engine"])
-    args.playback_engine = str(state["playback_engine"])
-    args.fluidsynth_bin = str(state["fluidsynth_bin"])
-    args.audio_driver = str(state["audio_driver"])
-    args.audio_output = str(state["audio_output"])
-    args.audio_gain = float(state["audio_gain"])
-    args.audio_period_size = int(state["audio_period_size"])
-    args.audio_periods = int(state["audio_periods"])
-    args.audio_samplerate = int(state["audio_samplerate"])
-    args.audio_polyphony = int(state["audio_polyphony"])
-    args.instrument = str(state["instrument"])
-    args.instrument_bank, args.instrument_program = parse_instrument_pair(str(state["instrument"]))
-    args.track_instruments = dict(state["track_instruments"])
-    args.track_colors = dict(state["track_colors"])
-    args.track_volumes = dict(state["track_volumes"])
-    args.fps = int(state["fps"])
-    args.rows = int(state["rows"])
-    args.x_scale = int(state["x_scale"])
-    args.kb_y_scale = int(state["kb_y_scale"])
-    args.kb_black_extra = int(state["kb_black_extra"])
-    args.dynamics_full_velocity = float(state["dynamics_full_velocity"])
-    args.terminal_bg_color = str(state["terminal_bg_color"]).strip()
-    args.note_color_mode = normalize_color_mode(str(state["note_color_mode"]))
-    args.pedal_color_mode = normalize_color_mode(str(state["pedal_color_mode"]))
-    args.piano_color_mode = normalize_color_mode(str(state["piano_color_mode"]))
-    args.track_color_mode = normalize_color_mode(str(state["track_color_mode"]))
-    args.glyph_note_white = _sanitize_visual_glyph(state["glyph_note_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_white"])
-    args.glyph_note_pedal_white = _sanitize_visual_glyph(
-        state["glyph_note_pedal_white"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_white"]
-    )
-    args.glyph_note_pedal_black_left = _sanitize_visual_glyph(
-        state["glyph_note_pedal_black_left"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_black_left"]
-    )
-    args.glyph_note_pedal_black_mid = _sanitize_visual_glyph(
-        state["glyph_note_pedal_black_mid"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_black_mid"]
-    )
-    args.glyph_note_pedal_black_right = _sanitize_visual_glyph(
-        state["glyph_note_pedal_black_right"], DEFAULT_VISUAL_GLYPHS["glyph_note_pedal_black_right"]
-    )
-    args.glyph_note_black_left = _sanitize_visual_glyph(
-        state["glyph_note_black_left"], DEFAULT_VISUAL_GLYPHS["glyph_note_black_left"]
-    )
-    args.glyph_note_black_mid = _sanitize_visual_glyph(
-        state["glyph_note_black_mid"], DEFAULT_VISUAL_GLYPHS["glyph_note_black_mid"]
-    )
-    args.glyph_note_black_right = _sanitize_visual_glyph(
-        state["glyph_note_black_right"], DEFAULT_VISUAL_GLYPHS["glyph_note_black_right"]
-    )
-    args.glyph_piano_white = _sanitize_visual_glyph(
-        state["glyph_piano_white"], DEFAULT_VISUAL_GLYPHS["glyph_piano_white"]
-    )
-    args.glyph_piano_black_left = _sanitize_visual_glyph(
-        state["glyph_piano_black_left"], DEFAULT_VISUAL_GLYPHS["glyph_piano_black_left"]
-    )
-    args.glyph_piano_black_mid = _sanitize_visual_glyph(
-        state["glyph_piano_black_mid"], DEFAULT_VISUAL_GLYPHS["glyph_piano_black_mid"]
-    )
-    args.glyph_piano_black_right = _sanitize_visual_glyph(
-        state["glyph_piano_black_right"], DEFAULT_VISUAL_GLYPHS["glyph_piano_black_right"]
-    )
-    args.pedal_visual_dots = bool(state["pedal_visual_dots"])
-    args.disable_pedal = bool(state["disable_pedal"])
-    args.pedal_opacity_scale = max(0.0, min(1.0, float(state["pedal_opacity_scale"])))
-    args.pedal_decay_seconds = max(0.0, float(state["pedal_decay_seconds"]))
-    args.measure_bars = bool(state["measure_bars"])
-    args.drop_speed = float(state["drop_speed"])
-    args.speed = float(state["speed"])
-    args.midi_flip = bool(state["midi_flip"])
-    args.stuck_note_fix = normalize_stuck_note_fix_mode(str(state["stuck_note_fix"]))
-    args.long_note_threshold = max(0.0, float(state["long_note_threshold"]))
-    args.long_note_duration = max(0.0, float(state["long_note_duration"]))
-    args.start = float(state["start"])
-    args.range = str(state["range"])
-    args.hide_piano = bool(state["hide_piano"])
-    args.no_color = bool(state["no_color"])
-    args.no_offpiano_pattern = bool(state["no_offpiano_pattern"])
-    args.offpiano_pattern = str(state["offpiano_pattern"])
-    args.pressed_key_color_mode = normalize_pressed_key_color_mode(str(state["pressed_key_color_mode"]))
+    for key, value in build_saved_config_snapshot().items():
+        if key != "selected_profile_name":
+            setattr(args, key, value)
     return args
 
 

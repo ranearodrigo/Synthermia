@@ -15,6 +15,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from synthermia.config import (
     ANSI16_TRACK_COLORS,
+    _normalize_saved_track_map,
+    default_ansi16_track_color,
+    default_track_color,
     normalize_color_mode,
     normalize_pressed_key_color_mode,
     normalize_visual_glyphs,
@@ -156,6 +159,25 @@ def rgb_triplet_to_text(rgb: Tuple[int, int, int]) -> str:
     return f"{r},{g},{b}"
 
 
+def build_track_color_map(
+    tracks: Sequence[int],
+    track_colors_raw: object,
+    track_color_mode: str = "truecolor",
+) -> Dict[int, Tuple[int, int, int]]:
+    overrides = _normalize_saved_track_map(track_colors_raw)
+    ordered_tracks = sorted({int(track) for track in tracks})
+    out: Dict[int, Tuple[int, int, int]] = {}
+    for i, track in enumerate(ordered_tracks):
+        default_rgb = (
+            default_ansi16_track_color(i)
+            if str(track_color_mode).strip().lower() == "ansi16"
+            else default_track_color(i, len(tracks))
+        )
+        override_txt = overrides.get(str(track))
+        out[track] = parse_rgb_triplet(override_txt, default_rgb) if override_txt else default_rgb
+    return out
+
+
 def darken_rgb(rgb: Tuple[int, int, int], factor: float) -> Tuple[int, int, int]:
     f = max(0.0, min(1.0, float(factor)))
     return _clamp_rgb_triplet(int(rgb[0] * f), int(rgb[1] * f), int(rgb[2] * f))
@@ -168,6 +190,71 @@ def blend_rgb(bg_rgb: Tuple[int, int, int], fg_rgb: Tuple[int, int, int], alpha:
         int(round(bg_rgb[1] * (1.0 - a) + fg_rgb[1] * a)),
         int(round(bg_rgb[2] * (1.0 - a) + fg_rgb[2] * a)),
     )
+
+
+def pressed_tint(rgb: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    base = (165, 165, 165)
+    alpha = 0.45
+    return (
+        int(round(base[0] * (1.0 - alpha) + rgb[0] * alpha)),
+        int(round(base[1] * (1.0 - alpha) + rgb[1] * alpha)),
+        int(round(base[2] * (1.0 - alpha) + rgb[2] * alpha)),
+    )
+
+
+def blend_rgbs(colors: Sequence[Tuple[int, int, int]]) -> Tuple[int, int, int]:
+    if not colors:
+        return (165, 165, 165)
+    r = int(round(sum(c[0] for c in colors) / len(colors)))
+    g = int(round(sum(c[1] for c in colors) / len(colors)))
+    b = int(round(sum(c[2] for c in colors) / len(colors)))
+    return (r, g, b)
+
+
+def blend_hue_weighted(weighted_colors: Sequence[Tuple[Tuple[int, int, int], float]]) -> Tuple[int, int, int]:
+    total_w = 0.0
+    hue_x = 0.0
+    hue_y = 0.0
+    sat_acc = 0.0
+    val_acc = 0.0
+    for rgb, w in weighted_colors:
+        weight = max(0.0, float(w))
+        if weight <= 0:
+            continue
+        r_f = max(0.0, min(1.0, rgb[0] / 255.0))
+        g_f = max(0.0, min(1.0, rgb[1] / 255.0))
+        b_f = max(0.0, min(1.0, rgb[2] / 255.0))
+        h, s, v = colorsys.rgb_to_hsv(r_f, g_f, b_f)
+        ang = h * (2.0 * math.pi)
+        hue_weight = weight * max(0.15, s)
+        hue_x += math.cos(ang) * hue_weight
+        hue_y += math.sin(ang) * hue_weight
+        sat_acc += s * weight
+        val_acc += v * weight
+        total_w += weight
+    if total_w <= 0:
+        return (165, 165, 165)
+    sat = sat_acc / total_w
+    val = val_acc / total_w
+    if abs(hue_x) < 1e-9 and abs(hue_y) < 1e-9:
+        den = sum(max(0.0, float(w)) for _rgb, w in weighted_colors)
+        if den <= 0:
+            return (165, 165, 165)
+        rr = int(round(sum(rgb[0] * max(0.0, float(w)) for rgb, w in weighted_colors) / den))
+        gg = int(round(sum(rgb[1] * max(0.0, float(w)) for rgb, w in weighted_colors) / den))
+        bb = int(round(sum(rgb[2] * max(0.0, float(w)) for rgb, w in weighted_colors) / den))
+        return _clamp_rgb_triplet(rr, gg, bb)
+    hue = (math.atan2(hue_y, hue_x) / (2.0 * math.pi)) % 1.0
+    r_m, g_m, b_m = colorsys.hsv_to_rgb(hue, sat, val)
+    return _clamp_rgb_triplet(int(round(r_m * 255)), int(round(g_m * 255)), int(round(b_m * 255)))
+
+
+def add_unique_track(dst: Dict[int, List[int]], note: int, track_idx: int) -> None:
+    arr = dst.get(note)
+    if arr is None:
+        dst[note] = [track_idx]
+    elif track_idx not in arr:
+        arr.append(track_idx)
 
 
 _ANSI16_RGB: Dict[int, Tuple[int, int, int]] = {
@@ -490,68 +577,6 @@ def _render_density_frame(
         if track_colors and track_idx in track_colors:
             return track_colors[track_idx]
         return default_white_note
-
-    def pressed_tint(rgb: Tuple[int, int, int]) -> Tuple[int, int, int]:
-        base = (165, 165, 165)
-        alpha = 0.45
-        return (
-            int(round(base[0] * (1.0 - alpha) + rgb[0] * alpha)),
-            int(round(base[1] * (1.0 - alpha) + rgb[1] * alpha)),
-            int(round(base[2] * (1.0 - alpha) + rgb[2] * alpha)),
-        )
-
-    def blend_rgbs(colors: Sequence[Tuple[int, int, int]]) -> Tuple[int, int, int]:
-        if not colors:
-            return (165, 165, 165)
-        r = int(round(sum(c[0] for c in colors) / len(colors)))
-        g = int(round(sum(c[1] for c in colors) / len(colors)))
-        b = int(round(sum(c[2] for c in colors) / len(colors)))
-        return (r, g, b)
-
-    def blend_hue_weighted(weighted_colors: Sequence[Tuple[Tuple[int, int, int], float]]) -> Tuple[int, int, int]:
-        total_w = 0.0
-        hue_x = 0.0
-        hue_y = 0.0
-        sat_acc = 0.0
-        val_acc = 0.0
-        for rgb, w in weighted_colors:
-            weight = max(0.0, float(w))
-            if weight <= 0:
-                continue
-            r_f = max(0.0, min(1.0, rgb[0] / 255.0))
-            g_f = max(0.0, min(1.0, rgb[1] / 255.0))
-            b_f = max(0.0, min(1.0, rgb[2] / 255.0))
-            h, s, v = colorsys.rgb_to_hsv(r_f, g_f, b_f)
-            ang = h * (2.0 * math.pi)
-            hue_weight = weight * max(0.15, s)
-            hue_x += math.cos(ang) * hue_weight
-            hue_y += math.sin(ang) * hue_weight
-            sat_acc += s * weight
-            val_acc += v * weight
-            total_w += weight
-        if total_w <= 0:
-            return (165, 165, 165)
-        sat = sat_acc / total_w
-        val = val_acc / total_w
-        if abs(hue_x) < 1e-9 and abs(hue_y) < 1e-9:
-            den = sum(max(0.0, float(w)) for _rgb, w in weighted_colors)
-            if den <= 0:
-                return (165, 165, 165)
-            rr = int(round(sum(rgb[0] * max(0.0, float(w)) for rgb, w in weighted_colors) / den))
-            gg = int(round(sum(rgb[1] * max(0.0, float(w)) for rgb, w in weighted_colors) / den))
-            bb = int(round(sum(rgb[2] * max(0.0, float(w)) for rgb, w in weighted_colors) / den))
-            return _clamp_rgb_triplet(rr, gg, bb)
-        hue = (math.atan2(hue_y, hue_x) / (2.0 * math.pi)) % 1.0
-        r_m, g_m, b_m = colorsys.hsv_to_rgb(hue, sat, val)
-        return _clamp_rgb_triplet(int(round(r_m * 255)), int(round(g_m * 255)), int(round(b_m * 255)))
-
-    def add_unique_track(dst: Dict[int, List[int]], note: int, track_idx: int) -> None:
-        arr = dst.get(note)
-        if arr is None:
-            dst[note] = [track_idx]
-            return
-        if track_idx not in arr:
-            arr.append(track_idx)
 
     def white_density_char(level: int) -> str:
         if level <= 1:
@@ -942,71 +967,6 @@ def render_frame(
         if track_colors and track_idx in track_colors:
             return track_colors[track_idx]
         return default_white_note
-
-    def pressed_tint(rgb: Tuple[int, int, int]) -> Tuple[int, int, int]:
-        # Keep a gray-looking pressed key, but bias hue toward the note color.
-        base = (165, 165, 165)
-        alpha = 0.45
-        return (
-            int(round(base[0] * (1.0 - alpha) + rgb[0] * alpha)),
-            int(round(base[1] * (1.0 - alpha) + rgb[1] * alpha)),
-            int(round(base[2] * (1.0 - alpha) + rgb[2] * alpha)),
-        )
-
-    def blend_rgbs(colors: Sequence[Tuple[int, int, int]]) -> Tuple[int, int, int]:
-        if not colors:
-            return (165, 165, 165)
-        r = int(round(sum(c[0] for c in colors) / len(colors)))
-        g = int(round(sum(c[1] for c in colors) / len(colors)))
-        b = int(round(sum(c[2] for c in colors) / len(colors)))
-        return (r, g, b)
-
-    def blend_hue_weighted(weighted_colors: Sequence[Tuple[Tuple[int, int, int], float]]) -> Tuple[int, int, int]:
-        total_w = 0.0
-        hue_x = 0.0
-        hue_y = 0.0
-        sat_acc = 0.0
-        val_acc = 0.0
-        for rgb, w in weighted_colors:
-            weight = max(0.0, float(w))
-            if weight <= 0:
-                continue
-            r_f = max(0.0, min(1.0, rgb[0] / 255.0))
-            g_f = max(0.0, min(1.0, rgb[1] / 255.0))
-            b_f = max(0.0, min(1.0, rgb[2] / 255.0))
-            h, s, v = colorsys.rgb_to_hsv(r_f, g_f, b_f)
-            ang = h * (2.0 * math.pi)
-            hue_weight = weight * max(0.15, s)
-            hue_x += math.cos(ang) * hue_weight
-            hue_y += math.sin(ang) * hue_weight
-            sat_acc += s * weight
-            val_acc += v * weight
-            total_w += weight
-        if total_w <= 0:
-            return (165, 165, 165)
-        sat = sat_acc / total_w
-        val = val_acc / total_w
-        if abs(hue_x) < 1e-9 and abs(hue_y) < 1e-9:
-            # Near-neutral hue vector: fall back to weighted RGB.
-            rgb_w: List[Tuple[Tuple[int, int, int], float]] = [(rgb, max(0.0, float(w))) for rgb, w in weighted_colors]
-            den = sum(w for _rgb, w in rgb_w)
-            if den <= 0:
-                return (165, 165, 165)
-            rr = int(round(sum(rgb[0] * w for rgb, w in rgb_w) / den))
-            gg = int(round(sum(rgb[1] * w for rgb, w in rgb_w) / den))
-            bb = int(round(sum(rgb[2] * w for rgb, w in rgb_w) / den))
-            return _clamp_rgb_triplet(rr, gg, bb)
-        hue = (math.atan2(hue_y, hue_x) / (2.0 * math.pi)) % 1.0
-        r_m, g_m, b_m = colorsys.hsv_to_rgb(hue, sat, val)
-        return _clamp_rgb_triplet(int(round(r_m * 255)), int(round(g_m * 255)), int(round(b_m * 255)))
-
-    def add_unique_track(dst: Dict[int, List[int]], note: int, track_idx: int) -> None:
-        arr = dst.get(note)
-        if arr is None:
-            dst[note] = [track_idx]
-            return
-        if track_idx not in arr:
-            arr.append(track_idx)
 
     window_sec = play_rows / move_speed
     if direction == "up":

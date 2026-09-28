@@ -25,8 +25,6 @@ from synthermia.audio import (
     _apply_track_volume_overrides,
     _assign_audio_channels,
     _assign_control_channels,
-    _build_track_color_map,
-    _build_track_color_map_for_tracks,
     _build_track_program_map,
     _build_track_program_map_for_tracks,
     _resolve_audio_driver,
@@ -71,6 +69,7 @@ from synthermia.packed import (
 )
 from synthermia.render import (
     _safe_stdout_write,
+    build_track_color_map,
     keyboard_row_counts,
     keyboard_width,
     ornamental_fill,
@@ -553,6 +552,73 @@ def parse_keys(buf: str) -> Tuple[List[str], str]:
         i += 3
     return out, buf[i:]
 
+
+def _playback_layout(
+    args: argparse.Namespace,
+    spans: Sequence[NoteSpan],
+) -> Tuple[os.terminal_size, int, int, int, int, int, int]:
+    term_size = shutil.get_terminal_size(fallback=(120, 36))
+    # Outer border, inner frame, and the render header consume five rows.
+    max_rows = max(4, term_size.lines - 5)
+    _black_rows, _white_rows, kb_rows = keyboard_row_counts(args.kb_y_scale, args.kb_black_extra)
+    min_rows = kb_rows + 1
+    if max_rows < min_rows:
+        raise ValueError(
+            f"Terminal too short for --kb-y-scale {args.kb_y_scale}; need at least {min_rows + 5} terminal lines."
+        )
+    rows = max(min_rows, min(args.rows, max_rows))
+
+    note_range = None
+    if args.range:
+        note_range = parse_note_range_text(str(args.range))
+        if note_range is None:
+            raise ValueError("--range must be like 21:108")
+    note_lo, note_hi = choose_note_range(spans, note_range)
+    max_frame_cols = max(8, max(1, term_size.columns) - 4)
+    x_scale = int(args.x_scale)
+    while x_scale > 1 and keyboard_width(note_lo, note_hi, x_scale) > max_frame_cols:
+        x_scale -= 1
+    if x_scale != args.x_scale:
+        print(f"Note: --x-scale {args.x_scale} does not fit terminal width; using {x_scale}.", file=sys.stderr)
+    frame_cols = keyboard_width(note_lo, note_hi, x_scale)
+    return term_size, rows, rows - kb_rows, note_lo, note_hi, x_scale, frame_cols
+
+
+def _prepare_audio_routing(
+    args: argparse.Namespace,
+    spans: Sequence[NoteSpan],
+    controls: Sequence[ControlEvent],
+) -> Tuple[
+    List[NoteSpan], Dict[int, Tuple[int, int]], Dict[int, str], List[ControlEvent], List[str], bool
+]:
+    default_program = _clamp_instrument_pair(
+        int(getattr(args, "instrument_bank", 0) or 0),
+        int(getattr(args, "instrument_program", 0) or 0),
+    )
+    soundfont_paths = _normalize_saved_soundfont_library(
+        getattr(args, "soundfonts", []),
+        primary_soundfont=str(getattr(args, "soundfont", "")),
+    )
+    if not args.soundfont:
+        return [], {0: default_program}, {0: ""}, list(controls), soundfont_paths, False
+
+    valid_pairs_by_sf = _build_soundfont_pair_map(soundfont_paths)
+    track_programs = _build_track_program_map(
+        spans,
+        default_program,
+        str(args.soundfont),
+        getattr(args, "track_instruments", {}),
+        valid_pairs_by_sf=valid_pairs_by_sf,
+    )
+    audio_spans, channel_programs, channel_soundfonts, source_channels, track_default_channels = (
+        _assign_audio_channels(spans, track_programs)
+    )
+    audio_spans = _apply_track_volume_overrides(audio_spans, getattr(args, "track_volumes", {}))
+    audio_controls = _assign_control_channels(controls, source_channels, track_default_channels)
+    active_soundfonts = {path.strip() for path in channel_soundfonts.values() if path.strip()}
+    return audio_spans, channel_programs, channel_soundfonts, audio_controls, soundfont_paths, len(active_soundfonts) > 1
+
+
 def playback(
     spans: Optional[Sequence[NoteSpan]],
     args: argparse.Namespace,
@@ -565,43 +631,10 @@ def playback(
     if (not spans_active) and packed_source is None:
         raise ValueError("No playable notes found in MIDI")
 
-    term_size = shutil.get_terminal_size(fallback=(120, 36))
-    # Height budget:
-    # - outer ornament border: 2 rows
-    # - inner piano frame border: 2 rows
-    # - render_frame adds 1 header row on top of `rows`
-    # So total terminal rows needed = rows + 5.
-    max_rows = max(4, term_size.lines - 5)
-    _b_rows, _w_rows, kb_rows = keyboard_row_counts(args.kb_y_scale, args.kb_black_extra)
-    min_rows = kb_rows + 1
-    if max_rows < min_rows:
-        raise ValueError(
-            f"Terminal too short for --kb-y-scale {args.kb_y_scale}; need at least {min_rows + 5} terminal lines."
-        )
-    rows = max(min_rows, min(args.rows, max_rows))
-    play_rows = rows - kb_rows
-
-    lo_hi = None
-    if args.range:
-        lo_hi = parse_note_range_text(str(args.range))
-        if lo_hi is None:
-            raise ValueError("--range must be like 21:108")
-
-    note_lo, note_hi = choose_note_range(spans_active, lo_hi)
-    term_w = max(1, term_size.columns)
-    max_frame_cols = max(8, term_w - 4)  # outer border (2) + inner piano border (2)
-    effective_x_scale = args.x_scale
-    while effective_x_scale > 1 and keyboard_width(note_lo, note_hi, effective_x_scale) > max_frame_cols:
-        effective_x_scale -= 1
-    if effective_x_scale != args.x_scale:
-        print(
-            f"Note: --x-scale {args.x_scale} does not fit terminal width; using {effective_x_scale}.",
-            file=sys.stderr,
-        )
-    frame_cols = keyboard_width(note_lo, note_hi, effective_x_scale)
+    term_size, rows, play_rows, note_lo, note_hi, effective_x_scale, frame_cols = _playback_layout(args, spans_active)
     show_piano = not bool(getattr(args, "hide_piano", False))
     track_ids = packed_source.track_ids() if packed_source is not None else [int(getattr(sp, "track", 0)) for sp in spans_active]
-    track_color_map = _build_track_color_map_for_tracks(
+    track_color_map = build_track_color_map(
         track_ids,
         getattr(args, "track_colors", {}),
         str(getattr(args, "track_color_mode", "truecolor")),
@@ -629,43 +662,9 @@ def playback(
         if pedal_visual_spans:
             pedal_window_index = _build_span_window_index(pedal_visual_spans)
 
-    default_program = _clamp_instrument_pair(
-        int(getattr(args, "instrument_bank", 0) or 0),
-        int(getattr(args, "instrument_program", 0) or 0),
+    audio_spans, channel_programs, channel_soundfonts, audio_controls, soundfont_paths, requires_python_audio = (
+        _prepare_audio_routing(args, require_all_spans() if args.soundfont else spans_active, controls_src)
     )
-    soundfont_paths = _normalize_saved_soundfont_library(
-        getattr(args, "soundfonts", []),
-        primary_soundfont=str(getattr(args, "soundfont", "")),
-    )
-    valid_pairs_by_sf = _build_soundfont_pair_map(soundfont_paths)
-    requires_python_audio = False
-    if args.soundfont:
-        source_spans = require_all_spans()
-        track_programs = _build_track_program_map(
-            source_spans,
-            default_program,
-            str(args.soundfont),
-            getattr(args, "track_instruments", {}),
-            valid_pairs_by_sf=valid_pairs_by_sf,
-        )
-        (
-            audio_spans,
-            channel_programs,
-            channel_soundfonts,
-            source_channels,
-            track_default_channels,
-        ) = _assign_audio_channels(source_spans, track_programs)
-        nonempty_sf = {str(v).strip() for v in channel_soundfonts.values() if str(v).strip()}
-        requires_python_audio = len(nonempty_sf) > 1
-        audio_spans = _apply_track_volume_overrides(audio_spans, getattr(args, "track_volumes", {}))
-        audio_controls = _assign_control_channels(controls_src, source_channels, track_default_channels)
-    else:
-        audio_spans = []
-        channel_programs = {0: default_program}
-        channel_soundfonts = {0: str(getattr(args, "soundfont", "")).strip()}
-        source_channels = {}
-        track_default_channels = {}
-        audio_controls = list(controls_src)
 
     start_time = args.start
     end_time = float(packed_source_active.duration_sec) if packed_source_active is not None else max(sp.end for sp in spans_active)
@@ -707,13 +706,12 @@ def playback(
         final_note_diag_reported = True
 
     def rebuild_playback_runtime(resume_t: float, *, show_loading_popup: bool = False) -> None:
-        nonlocal spans_active, controls_src, measure_times_src, term_size, max_rows, rows
-        nonlocal _b_rows, _w_rows, kb_rows, min_rows, play_rows
-        nonlocal lo_hi, note_lo, note_hi, term_w, max_frame_cols, effective_x_scale, frame_cols
+        nonlocal spans_active, controls_src, measure_times_src, term_size, rows, play_rows
+        nonlocal note_lo, note_hi, effective_x_scale, frame_cols
         nonlocal show_piano, track_color_map, terminal_bg_rgb, visual_glyphs
         nonlocal span_window_index, packed_source_active, pedal_visual_spans, pedal_window_index
-        nonlocal default_program, track_programs, soundfont_paths, valid_pairs_by_sf, requires_python_audio
-        nonlocal audio_spans, channel_programs, channel_soundfonts, source_channels, track_default_channels, audio_controls
+        nonlocal soundfont_paths, requires_python_audio
+        nonlocal audio_spans, channel_programs, channel_soundfonts, audio_controls
         nonlocal start_time, end_time, frame_dt, title, use_offpiano_pattern, custom_offpiano_pattern, audio_gain
         nonlocal audio_engine, audio_engine_active, play_t, clock_anchor_t, clock_anchor_perf, paused
         nonlocal py_audio, audio_proc, audio_temp_midi, audio_cache_key, pending_packed_task
@@ -794,38 +792,10 @@ def playback(
         if bool(getattr(args, "disable_pedal", False)):
             controls_src = [ev for ev in controls_src if int(getattr(ev, "controller", -1)) != 64]
 
-        term_size = shutil.get_terminal_size(fallback=(120, 36))
-        max_rows = max(4, term_size.lines - 5)
-        _b_rows, _w_rows, kb_rows = keyboard_row_counts(args.kb_y_scale, args.kb_black_extra)
-        min_rows = kb_rows + 1
-        if max_rows < min_rows:
-            raise ValueError(
-                f"Terminal too short for --kb-y-scale {args.kb_y_scale}; need at least {min_rows + 5} terminal lines."
-            )
-        rows = max(min_rows, min(args.rows, max_rows))
-        play_rows = rows - kb_rows
-
-        lo_hi = None
-        if args.range:
-            lo_hi = parse_note_range_text(str(args.range))
-            if lo_hi is None:
-                raise ValueError("--range must be like 21:108")
-
-        note_lo, note_hi = choose_note_range(spans_active, lo_hi)
-        term_w = max(1, term_size.columns)
-        max_frame_cols = max(8, term_w - 4)
-        effective_x_scale = int(args.x_scale)
-        while effective_x_scale > 1 and keyboard_width(note_lo, note_hi, effective_x_scale) > max_frame_cols:
-            effective_x_scale -= 1
-        if effective_x_scale != args.x_scale:
-            print(
-                f"Note: --x-scale {args.x_scale} does not fit terminal width; using {effective_x_scale}.",
-                file=sys.stderr,
-            )
-        frame_cols = keyboard_width(note_lo, note_hi, effective_x_scale)
+        term_size, rows, play_rows, note_lo, note_hi, effective_x_scale, frame_cols = _playback_layout(args, spans_active)
         show_piano = not bool(getattr(args, "hide_piano", False))
         track_ids = packed_source_active.track_ids() if packed_source_active is not None else [int(getattr(sp, "track", 0)) for sp in spans_active]
-        track_color_map = _build_track_color_map_for_tracks(
+        track_color_map = build_track_color_map(
             track_ids,
             getattr(args, "track_colors", {}),
             str(getattr(args, "track_color_mode", "truecolor")),
@@ -839,44 +809,9 @@ def playback(
             if pedal_visual_spans:
                 pedal_window_index = _build_span_window_index(pedal_visual_spans)
 
-        default_program = _clamp_instrument_pair(
-            int(getattr(args, "instrument_bank", 0) or 0),
-            int(getattr(args, "instrument_program", 0) or 0),
+        audio_spans, channel_programs, channel_soundfonts, audio_controls, soundfont_paths, requires_python_audio = (
+            _prepare_audio_routing(args, require_all_spans() if args.soundfont else spans_active, controls_src)
         )
-        soundfont_paths = _normalize_saved_soundfont_library(
-            getattr(args, "soundfonts", []),
-            primary_soundfont=str(getattr(args, "soundfont", "")),
-        )
-        valid_pairs_by_sf = _build_soundfont_pair_map(soundfont_paths)
-        if args.soundfont:
-            source_spans = require_all_spans()
-            track_programs = _build_track_program_map(
-                source_spans,
-                default_program,
-                str(args.soundfont),
-                getattr(args, "track_instruments", {}),
-                valid_pairs_by_sf=valid_pairs_by_sf,
-            )
-            (
-                audio_spans,
-                channel_programs,
-                channel_soundfonts,
-                source_channels,
-                track_default_channels,
-            ) = _assign_audio_channels(source_spans, track_programs)
-            nonempty_sf = {str(v).strip() for v in channel_soundfonts.values() if str(v).strip()}
-            requires_python_audio = len(nonempty_sf) > 1
-            audio_spans = _apply_track_volume_overrides(audio_spans, getattr(args, "track_volumes", {}))
-            audio_controls = _assign_control_channels(controls_src, source_channels, track_default_channels)
-        else:
-            track_programs = {}
-            audio_spans = []
-            channel_programs = {0: default_program}
-            channel_soundfonts = {0: str(getattr(args, "soundfont", "")).strip()}
-            source_channels = {}
-            track_default_channels = {}
-            audio_controls = list(controls_src)
-            requires_python_audio = False
 
         start_time = float(resume_t)
         end_time = float(packed_source_active.duration_sec) if packed_source_active is not None else max(sp.end for sp in spans_active)
@@ -1490,35 +1425,11 @@ def playback_live_midi_input(args: argparse.Namespace) -> None:
     fcntl.fcntl(midi_fd, fcntl.F_SETFL, midi_old_flags | os.O_NONBLOCK)
     midi_buf = b""
 
-    term_size = shutil.get_terminal_size(fallback=(120, 36))
-    max_rows = max(4, term_size.lines - 5)
-    _b_rows, _w_rows, kb_rows = keyboard_row_counts(args.kb_y_scale, args.kb_black_extra)
-    min_rows = kb_rows + 1
-    if max_rows < min_rows:
+    try:
+        term_size, rows, _play_rows, note_lo, note_hi, effective_x_scale, frame_cols = _playback_layout(args, [])
+    except ValueError:
         stop_process(midi_proc)
-        raise ValueError(
-            f"Terminal too short for --kb-y-scale {args.kb_y_scale}; need at least {min_rows + 5} terminal lines."
-        )
-    rows = max(min_rows, min(args.rows, max_rows))
-
-    lo_hi = None
-    if args.range:
-        lo_hi = parse_note_range_text(str(args.range))
-        if lo_hi is None:
-            stop_process(midi_proc)
-            raise ValueError("--range must be like 21:108")
-    note_lo, note_hi = choose_note_range([], lo_hi)
-    term_w = max(1, term_size.columns)
-    max_frame_cols = max(8, term_w - 4)
-    effective_x_scale = int(args.x_scale)
-    while effective_x_scale > 1 and keyboard_width(note_lo, note_hi, effective_x_scale) > max_frame_cols:
-        effective_x_scale -= 1
-    if effective_x_scale != args.x_scale:
-        print(
-            f"Note: --x-scale {args.x_scale} does not fit terminal width; using {effective_x_scale}.",
-            file=sys.stderr,
-        )
-    frame_cols = keyboard_width(note_lo, note_hi, effective_x_scale)
+        raise
     show_piano = not bool(getattr(args, "hide_piano", False))
     use_offpiano_pattern = not args.no_offpiano_pattern
     custom_offpiano_pattern = str(getattr(args, "offpiano_pattern", ""))
