@@ -33,6 +33,7 @@ class MprisMediaControls:
         self._stop_event: Optional[asyncio.Event] = None
         self._player_service = None
         self._thread: Optional[threading.Thread] = None
+        self.error: Optional[Exception] = None
 
     def start(self) -> None:
         if self._thread is not None:
@@ -88,9 +89,8 @@ class MprisMediaControls:
     def _run(self) -> None:
         try:
             asyncio.run(self._serve())
-        except Exception:
-            # MPRIS is optional: terminal playback remains available without a session bus.
-            return
+        except Exception as exc:
+            self.error = exc
 
     async def _serve(self) -> None:
         from dbus_next.aio import MessageBus

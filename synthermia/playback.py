@@ -1371,6 +1371,8 @@ def playback(
             os.unlink(audio_temp_midi)
         restore_terminal_input_mode()
         _safe_stdout_write("\x1b[0m\x1b[?25h\n")
+        if media_controls.error is not None:
+            print(f"Media controls unavailable: {media_controls.error}", file=sys.stderr)
 
 
 def _default_live_recording_path(save_dir: str) -> str:
