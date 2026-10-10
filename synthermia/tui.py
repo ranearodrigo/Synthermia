@@ -52,6 +52,7 @@ from synthermia.config import (
     normalize_note_range_text,
     parse_live_color_map,
     parse_live_instrument_map,
+    resolve_midi_flip_bounds,
     resolve_visual_glyphs,
     save_config_profiles,
     save_last_config,
@@ -2893,20 +2894,7 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                 typed = _edit_text_popup(stdscr, "Export MP3 Path", default_out)
                 out_path = str(typed).strip() or default_out
                 try:
-                    export_args = argparse.Namespace(**vars(args))
-                    export_args.midi = str(state["midi"])
-                    export_args.soundfont = str(state["soundfont"])
-                    export_args.soundfonts = list(_normalize_saved_soundfont_library(state.get("soundfonts", [])))
-                    export_args.fluidsynth_bin = str(state["fluidsynth_bin"])
-                    export_args.audio_gain = float(state["audio_gain"])
-                    export_args.audio_samplerate = int(state["audio_samplerate"])
-                    export_args.audio_polyphony = int(state["audio_polyphony"])
-                    export_args.instrument_bank, export_args.instrument_program = parse_instrument_pair(str(state["instrument"]))
-                    export_args.track_instruments = dict(state["track_instruments"])
-                    export_args.track_volumes = dict(state["track_volumes"])
-                    export_args.stuck_note_fix = normalize_stuck_note_fix_mode(str(state["stuck_note_fix"]))
-                    export_args.long_note_threshold = float(state["long_note_threshold"])
-                    export_args.long_note_duration = float(state["long_note_duration"])
+                    export_args = argparse.Namespace(**{**vars(args), **build_saved_config_snapshot()})
                     saved_path = export_configured_midi_to_mp3(export_args, out_path, stdscr=stdscr)
                     _message_popup(stdscr, " Export MP3 ", f"Saved to:\n{saved_path}")
                 except Exception as exc:
@@ -3369,6 +3357,29 @@ def _default_export_mp3_path(midi_path: str) -> str:
     return os.path.join(base_dir, f"{stem}.mp3")
 
 
+def _run_export_process(
+    cmd: List[str],
+    stdscr: Optional["curses._CursesWindow"],
+    message: str,
+    detail: str = "",
+) -> None:
+    # A file keeps progress polling independent of pipe buffer capacity.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as log:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
+        try:
+            phase = 0
+            while proc.poll() is None:
+                if stdscr is not None:
+                    _draw_progress_popup(stdscr, " Export MP3 ", message, phase=phase, detail=detail)
+                phase += 1
+                time.sleep(0.12)
+            if proc.returncode != 0:
+                log.seek(0)
+                raise ValueError(f"{os.path.basename(cmd[0])} failed ({proc.returncode}): {log.read().strip()}")
+        finally:
+            stop_process(proc)
+
+
 def export_configured_midi_to_mp3(
     args: argparse.Namespace,
     output_path: str,
@@ -3498,28 +3509,10 @@ def export_configured_midi_to_mp3(
             if int(getattr(args, "audio_polyphony", 0) or 0) > 0:
                 fs_cmd.extend(["-o", f"synth.polyphony={int(getattr(args, 'audio_polyphony', 0))}"])
             fs_cmd.extend([stem_sf, stem_midi])
-            fs_run = subprocess.Popen(
-                fs_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
+            _run_export_process(
+                fs_cmd, stdscr, f"Step 2/3: Rendering stem {idx}/{total_stems}",
+                os.path.basename(stem_sf) or stem_sf,
             )
-            phase = 2
-            while fs_run.poll() is None:
-                if stdscr is not None:
-                    _draw_progress_popup(
-                        stdscr,
-                        " Export MP3 ",
-                        f"Step 2/3: Rendering stem {idx}/{total_stems}",
-                        phase=phase,
-                        detail=os.path.basename(stem_sf) or stem_sf,
-                    )
-                phase += 1
-                time.sleep(0.12)
-            fs_stdout, fs_stderr = fs_run.communicate()
-            if fs_run.returncode != 0:
-                err = (fs_stderr or fs_stdout or "").strip()
-                raise ValueError(f"FluidSynth render failed ({os.path.basename(stem_sf)}): {err or 'unknown error'}")
 
         if stdscr is not None:
             _draw_progress_popup(
@@ -3545,27 +3538,7 @@ def export_configured_midi_to_mp3(
                     out_path,
                 ]
             )
-        ff_run = subprocess.Popen(
-            ffmpeg_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        phase = 2
-        while ff_run.poll() is None:
-            if stdscr is not None:
-                _draw_progress_popup(
-                    stdscr,
-                    " Export MP3 ",
-                    "Step 3/3: Encoding MP3 with ffmpeg",
-                    phase=phase,
-                )
-            phase += 1
-            time.sleep(0.12)
-        ff_stdout, ff_stderr = ff_run.communicate()
-        if ff_run.returncode != 0:
-            err = (ff_stderr or ff_stdout or "").strip()
-            raise ValueError(f"ffmpeg mp3 encode failed: {err or 'unknown error'}")
+        _run_export_process(ffmpeg_cmd, stdscr, "Step 3/3: Encoding MP3 with ffmpeg")
         if stdscr is not None:
             _draw_progress_popup(
                 stdscr,
