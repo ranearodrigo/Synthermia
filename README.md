@@ -2,6 +2,34 @@
 
 Terminal Synthesia-style MIDI visualizer with SoundFont playback, live MIDI input, and deep TUI customization.
 
+Supported platform: Linux. Live input uses ALSA; desktop media controls use
+MPRIS over the session D-Bus. Windows is unsupported, and macOS is untested.
+
+## Installation
+
+To run from a source checkout without building the optional native extension:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python main.py --help
+python main.py
+```
+
+To install the application and native extension from this checkout, install a
+Rust toolchain first, then run `python -m pip install .`. This installs the
+`synthermia` command and supports `python -m synthermia`. Installing a prebuilt
+wheel requires Python 3.10+ and does not require Rust:
+
+```bash
+python -m pip install /path/to/synthermia-0.1.0-*.whl
+synthermia --help
+```
+
+No MIDI files or SoundFonts are downloaded automatically. Visualization works
+without audio; optional feature dependencies are listed below.
+
 ## Dependencies
 
 Required (core app):
@@ -93,9 +121,6 @@ directory and leaves the old files untouched.
 - Terminal piano-roll rendering with Unicode glyphs
 - Multi-track parsing with tempo map, time signatures, controls, and note span generation
 
-MIDI formats 0 and 1 with a positive ticks-per-quarter-note time division are
-supported. Format 2 and SMPTE timing are unsupported. Malformed headers, track
-chunks, event data, and tempo values are reported as input errors in both loaders.
 - Stuck-note mitigation modes (`auto`, `off`, `lifo`) for imperfect MIDI files
 - Optional long-note cleanup that caps malformed note durations without extending ordinary notes
 - Optional measure bars in playfield
@@ -119,6 +144,10 @@ chunks, event data, and tempo values are reported as input errors in both loader
 - Live capture and save to MIDI (`s`) with CC64 pedal events preserved
 - Live instrument hotkey mapping (change instrument while playing)
 - MP3 export via TUI (FluidSynth renders to WAV, `ffmpeg` encodes to MP3)
+
+MIDI formats 0 and 1 with a positive ticks-per-quarter-note time division are
+supported. Format 2 and SMPTE timing are unsupported. Malformed headers, track
+chunks, event data, and tempo values are reported as input errors in both loaders.
 
 ## Runtime Controls
 
@@ -161,3 +190,24 @@ To build the extension locally:
 ```bash
 maturin develop
 ```
+
+## Development Checks
+
+```bash
+python3 -m py_compile main.py synthermia/*.py
+python3 -m unittest discover -v
+cargo check --locked
+maturin develop
+SYNTHERMIA_REQUIRE_NATIVE=1 python3 -m unittest discover -v
+maturin build --release --locked --out dist
+python3 tools/check_wheel.py dist/synthermia-0.1.0-*.whl
+```
+
+Tests cover export subprocesses, seek state, controller routing, settings
+persistence, terminal restoration, malformed MIDI, Python/native equivalence,
+and background packed loading. The wheel check installs into a temporary
+environment and checks both launch commands outside the checkout. CI runs the
+suite on Python 3.10 and 3.14 and verifies a wheel built from the source archive.
+
+The code is distributed under the [MIT license](LICENSE). Supply your own
+SoundFonts and MIDI files; they are separate from the application distribution.

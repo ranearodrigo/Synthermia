@@ -7,3 +7,5 @@ target/
 midis/
 soundfonts/
 synthermia_native.so
+.venv/
+dist/

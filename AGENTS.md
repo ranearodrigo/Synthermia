@@ -6,13 +6,13 @@ Synthermia is a terminal MIDI visualizer with optional SoundFont playback. Run i
 mise x -- uv run main.py
 ```
 
-Running without a MIDI opens the curses config screen. `main.py` owns CLI options and startup; it should stay a thin coordinator.
+Running without a MIDI opens the curses config screen. `synthermia/cli.py` owns CLI options and startup. `main.py` is the source-checkout launcher; keep both entry points thin coordinators.
 
 ### Find The Right Code
 
 | Need | Start here |
 | --- | --- |
-| CLI option, loading flow, startup errors | `main.py` |
+| CLI option, loading flow, startup errors | `synthermia/cli.py` |
 | MIDI parsing, tempo conversion, note/control spans | `synthermia/midi.py` |
 | Large-file packed loader and background loading | `synthermia/packed.py`, `src/lib.rs` |
 | Playback loop, seeking, pedal spans, live MIDI | `synthermia/playback.py` |
@@ -23,11 +23,11 @@ Running without a MIDI opens the curses config screen. `main.py` owns CLI option
 | SoundFont preset scanning and instrument labels | `synthermia/soundfont.py` |
 | Shared data classes and constants | `synthermia/models.py` |
 
-The normal file-loading path is `main.py` -> `packed.load_selected_playback_data()` -> either Python MIDI parsing or the Rust packed loader -> `playback.playback()` -> `render.render_frame()` and optional audio. Large files may keep building in the background, so changes to loading data must work for both complete and partial packed sources.
+The normal file-loading path is `cli.main()` -> `packed.load_selected_playback_data()` -> either Python MIDI parsing or the Rust packed loader -> `playback.playback()` -> `render.render_frame()` and optional audio. Large files may keep building in the background, so changes to loading data must work for both complete and partial packed sources.
 
 ### Feature Rules
 
-- Add a user setting in all of its real homes: CLI parsing in `main.py`, saved config in `config.py`, TUI state/field/save/return in `tui.py`, and every load or export path that uses it.
+- Add a user setting in all of its real homes: CLI parsing in `cli.py`, saved config in `config.py`, TUI state/field/save/return in `tui.py`, and every load or export path that uses it.
 - Keep Python and Rust MIDI results aligned. If a change affects parsing, spans, diagnostics, or packed queries, update `synthermia/midi.py` and `src/lib.rs` together.
 - `tui.py` intentionally keeps the config screen helpers inside `run_config_screen`. Extend that flow there unless the behavior is also used outside the TUI.
 - Instrument options include their SoundFont path internally. Do not reduce them to bank/program alone: two SoundFonts can have the same program number.

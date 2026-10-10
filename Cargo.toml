@@ -2,6 +2,8 @@
 name = "synthermia_native"
 version = "0.1.0"
 edition = "2021"
+description = "Packed MIDI loading and window queries for Synthermia"
+license = "MIT"
 
 [lib]
 name = "synthermia_native"
