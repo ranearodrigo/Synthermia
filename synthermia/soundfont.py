@@ -94,7 +94,7 @@ def _normalize_saved_soundfont_library(raw: object, primary_soundfont: str = "")
         txt = str(path_txt or "").strip()
         if not txt:
             return
-        key = os.path.abspath(txt).lower()
+        key = _soundfont_identity(txt)
         if key in seen:
             return
         seen.add(key)
@@ -114,7 +114,7 @@ def _soundfont_identity(path_txt: str) -> str:
     txt = str(path_txt or "").strip()
     if not txt:
         return ""
-    return os.path.abspath(txt).lower()
+    return os.path.normcase(os.path.abspath(txt))
 
 
 def _riff_chunks(data: bytes, start: int, end: int) -> List[Tuple[bytes, int, int]]:
@@ -182,7 +182,7 @@ def _build_soundfont_pair_map(soundfont_paths: Sequence[str]) -> Dict[str, set[T
         sf_txt = str(sf or "").strip()
         if not sf_txt or not os.path.exists(sf_txt):
             continue
-        sf_key = os.path.abspath(sf_txt).lower()
+        sf_key = _soundfont_identity(sf_txt)
         try:
             pairs = {
                 _clamp_instrument_pair(*parse_instrument_pair(opt, (0, 0)))

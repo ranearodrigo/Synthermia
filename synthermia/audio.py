@@ -20,6 +20,7 @@ from synthermia.models import NoteSpan, ControlEvent, _AudioEvent
 from synthermia.soundfont import (
     _clamp_instrument_pair,
     _normalize_saved_soundfont_library,
+    _soundfont_identity,
     parse_instrument_spec,
 )
 from synthermia.config import (
@@ -174,11 +175,11 @@ def _build_track_program_map_for_tracks(
 ) -> Dict[int, Tuple[str, int, int]]:
     default_bank, default_prog = _clamp_instrument_pair(default_pair[0], default_pair[1])
     default_sf = str(default_soundfont or "").strip()
-    default_sf_key = os.path.abspath(default_sf).lower() if default_sf else ""
+    default_sf_key = _soundfont_identity(default_sf)
 
     def _resolve_sf_key(sf_txt: str) -> str:
         sf_clean = str(sf_txt or "").strip()
-        return os.path.abspath(sf_clean).lower() if sf_clean else ""
+        return _soundfont_identity(sf_clean)
 
     def _pick_pair_for_sf(sf_key: str, pair: Tuple[int, int]) -> Tuple[int, int]:
         b, p = _clamp_instrument_pair(pair[0], pair[1])
@@ -496,9 +497,9 @@ class RealtimeFluidSynthPlayer:
                     loaded_sfid = synth.sfload(sf)
                     if loaded_sfid < 0:
                         raise RuntimeError(f"sfload failed for: {sf}")
-                    sf_key = os.path.abspath(sf).lower()
+                    sf_key = _soundfont_identity(sf)
                     self._soundfont_ids_by_key[sf_key] = int(loaded_sfid)
-                sfid = self._soundfont_ids_by_key.get(os.path.abspath(default_soundfont).lower(), -1)
+                sfid = self._soundfont_ids_by_key.get(_soundfont_identity(default_soundfont), -1)
                 if sfid < 0:
                     raise RuntimeError(f"default soundfont not loaded: {default_soundfont}")
                 self._synth = synth
@@ -527,7 +528,7 @@ class RealtimeFluidSynthPlayer:
             channel = max(0, min(15, int(ch)))
             bank, program = _clamp_instrument_pair(pair[0], pair[1])
             sf_txt = str(ch_sf.get(channel, default_soundfont) or default_soundfont).strip()
-            sf_key = os.path.abspath(sf_txt).lower() if sf_txt else os.path.abspath(default_soundfont).lower()
+            sf_key = _soundfont_identity(sf_txt) if sf_txt else _soundfont_identity(default_soundfont)
             sfid_for_ch = self._soundfont_ids_by_key.get(sf_key, self._sfid)
             self._channel_sfids[channel] = sfid_for_ch
             try:
