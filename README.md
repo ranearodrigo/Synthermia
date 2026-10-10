@@ -80,7 +80,13 @@ Running with no arguments opens an interactive configuration screen (curses TUI)
 - Export the current MIDI + SoundFont to MP3 (requires `ffmpeg`)
 - Preview instruments with a built-in demo player (`d` key in any instrument picker)
 
-Settings are persisted to `.synthermia_last_config.json` and restored on next launch.
+Settings and profiles are saved in `$XDG_CONFIG_HOME/synthermia/` (default:
+`~/.config/synthermia/`) as `last_config.json` and `profiles.json`. Writes are
+atomic and failures are reported. MIDI and SoundFont paths are stored as absolute
+paths so settings work from other directories. Existing `.synthermia_last_config.json`
+and `.synthermia_profiles.json` files in the launch directory are read when the
+corresponding user config file does not exist; the next save uses the user config
+directory and leaves the old files untouched.
 
 ## Functionalities
 

@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .synthermia_last_config.json
+.synthermia_profiles.json
 .codex_tmp_extracts/
 target/
 midis/

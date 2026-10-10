@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import tempfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from synthermia.models import CONFIG_FILE, MIN_PIANO_NOTE, MAX_PIANO_NOTE
@@ -14,6 +15,7 @@ from synthermia.soundfont import (
     _normalize_saved_soundfont_library,
     format_instrument_option,
     parse_instrument_pair,
+    _split_instrument_option,
     scan_soundfont_presets,
 )
 
@@ -157,46 +159,93 @@ def scan_files_by_ext(extensions: Tuple[str, ...]) -> List[str]:
     return out
 
 
-def load_last_config(path: str = CONFIG_FILE) -> Dict[str, object]:
+def _config_path(filename: str) -> str:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "synthermia", filename)
+
+
+def _read_config_json(path: Optional[str], filename: str, legacy_path: str):
+    selected = path if path is not None else _config_path(filename)
+    if path is None and not os.path.exists(selected) and os.path.exists(legacy_path):
+        selected = legacy_path
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
-    return {}
+        with open(selected, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
 
 
-def save_last_config(cfg: Dict[str, object], path: str = CONFIG_FILE) -> None:
+def _absolute_config_paths(cfg: Dict[str, object]) -> Dict[str, object]:
+    out = dict(cfg)
+    for key in ("midi", "soundfont", "midi_input_save_dir"):
+        value = str(out.get(key, "") or "").strip()
+        if value:
+            out[key] = os.path.abspath(value)
+    if "soundfonts" in out:
+        out["soundfonts"] = [os.path.abspath(sf) for sf in _normalize_saved_soundfont_library(out["soundfonts"])]
+
+    def absolute_instrument(value: object) -> str:
+        sf, payload = _split_instrument_option(str(value))
+        return f"{os.path.abspath(sf)}\t{payload}" if sf else payload
+
+    if "instrument" in out:
+        out["instrument"] = absolute_instrument(out["instrument"])
+    if "track_instruments" in out:
+        out["track_instruments"] = {
+            key: absolute_instrument(value) for key, value in _normalize_saved_track_map(out["track_instruments"]).items()
+        }
+    return out
+
+
+def _save_config_json(payload: object, path: str) -> None:
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    temporary = None
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2, sort_keys=True)
-    except Exception:
-        pass
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=folder, delete=False) as f:
+            temporary = f.name
+            json.dump(payload, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+    except OSError as exc:
+        raise OSError(f"Could not save settings to {path}: {exc}") from exc
+    finally:
+        if temporary is not None and os.path.exists(temporary):
+            os.unlink(temporary)
 
 
-def load_config_profiles(path: str = PROFILES_FILE) -> List[Dict[str, object]]:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, list):
-            return []
-        out: List[Dict[str, object]] = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("name", "")).strip()
-            config = item.get("config", {})
-            if not name or not isinstance(config, dict):
-                continue
-            out.append({"name": name, "config": dict(config)})
-        return out
-    except Exception:
+def load_last_config(path: Optional[str] = None) -> Dict[str, object]:
+    data = _read_config_json(path, "last_config.json", CONFIG_FILE)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError("Saved settings must contain a JSON object")
+    return _absolute_config_paths(data)
+
+
+def save_last_config(cfg: Dict[str, object], path: Optional[str] = None) -> None:
+    _save_config_json(_absolute_config_paths(cfg), path if path is not None else _config_path("last_config.json"))
+
+
+def load_config_profiles(path: Optional[str] = None) -> List[Dict[str, object]]:
+    data = _read_config_json(path, "profiles.json", PROFILES_FILE)
+    if data is None:
         return []
+    if not isinstance(data, list):
+        raise ValueError("Saved profiles must contain a JSON array")
+    out: List[Dict[str, object]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        config = item.get("config", {})
+        if name and isinstance(config, dict):
+            out.append({"name": name, "config": _absolute_config_paths(config)})
+    return out
 
 
-def save_config_profiles(profiles: Sequence[Dict[str, object]], path: str = PROFILES_FILE) -> None:
+def save_config_profiles(profiles: Sequence[Dict[str, object]], path: Optional[str] = None) -> None:
     payload: List[Dict[str, object]] = []
     for item in profiles:
         if not isinstance(item, dict):
@@ -205,12 +254,8 @@ def save_config_profiles(profiles: Sequence[Dict[str, object]], path: str = PROF
         config = item.get("config", {})
         if not name or not isinstance(config, dict):
             continue
-        payload.append({"name": name, "config": dict(config)})
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, sort_keys=True)
-    except Exception:
-        pass
+        payload.append({"name": name, "config": _absolute_config_paths(config)})
+    _save_config_json(payload, path if path is not None else _config_path("profiles.json"))
 
 
 def _normalize_saved_track_map(raw: object) -> Dict[str, str]:
