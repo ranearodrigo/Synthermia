@@ -255,12 +255,10 @@ def _assign_audio_channels(
     Dict[int, Tuple[int, int]],
     Dict[int, str],
     Dict[Tuple[int, int], int],
-    Dict[int, int],
 ]:
     channel_programs: Dict[int, Tuple[int, int]] = {}
     channel_soundfonts: Dict[int, str] = {}
     source_channels: Dict[Tuple[int, int], int] = {}
-    track_default_channels: Dict[int, int] = {}
     next_channel = 0
     for sp in spans:
         tr = int(getattr(sp, "track", 0))
@@ -276,12 +274,11 @@ def _assign_audio_channels(
         channel_programs[ch] = _clamp_instrument_pair(bank, prog)
         channel_soundfonts[ch] = str(sf_path or "").strip()
         source_channels[key] = ch
-        track_default_channels.setdefault(tr, ch)
     out: List[NoteSpan] = []
     for sp in spans:
         tr = int(getattr(sp, "track", 0))
         src_ch = max(0, min(15, int(getattr(sp, "channel", 0))))
-        ch = source_channels.get((tr, src_ch), track_default_channels.get(tr, 0))
+        ch = source_channels[(tr, src_ch)]
         out.append(
             NoteSpan(
                 note=sp.note,
@@ -292,28 +289,36 @@ def _assign_audio_channels(
                 track=tr,
             )
         )
-    return out, channel_programs, channel_soundfonts, source_channels, track_default_channels
+    return out, channel_programs, channel_soundfonts, source_channels
 
 
 def _assign_control_channels(
     controls: Sequence[ControlEvent],
     source_channels: Dict[Tuple[int, int], int],
-    track_default_channels: Dict[int, int],
 ) -> List[ControlEvent]:
+    channels_by_source: Dict[int, set[int]] = defaultdict(set)
+    for (_track, source), destination in source_channels.items():
+        channels_by_source[source].add(destination)
     out: List[ControlEvent] = []
     for ev in controls:
         tr = int(getattr(ev, "track", 0))
         src_ch = max(0, min(15, int(ev.channel)))
-        ch = source_channels.get((tr, src_ch), track_default_channels.get(tr, src_ch))
-        out.append(
-            ControlEvent(
-                time_sec=max(0.0, float(ev.time_sec)),
-                channel=ch,
-                controller=max(0, min(127, int(ev.controller))),
-                value=max(0, min(127, int(ev.value))),
-                track=tr,
+        destination = source_channels.get((tr, src_ch))
+        if destination is not None:
+            channels = [destination]
+        else:
+            # A separate controller track addresses every routed copy of its MIDI channel.
+            channels = sorted(channels_by_source.get(src_ch, ()))
+        for ch in channels:
+            out.append(
+                ControlEvent(
+                    time_sec=max(0.0, float(ev.time_sec)),
+                    channel=ch,
+                    controller=max(0, min(127, int(ev.controller))),
+                    value=max(0, min(127, int(ev.value))),
+                    track=tr,
+                )
             )
-        )
     out.sort(key=lambda e: e.time_sec)
     return out
 
@@ -532,6 +537,12 @@ class RealtimeFluidSynthPlayer:
             except Exception:
                 self._synth.program_select(channel, sfid_for_ch, 0, 0)
         self.set_gain(self._gain)
+        self._initial_controller_state = {
+            (channel, controller): self._synth.get_cc(channel, controller)
+            for channel, controller in {
+                (ev.channel, ev.controller) for ev in self._events if ev.kind == "cc" and ev.controller < 120
+            }
+        }
 
     @property
     def driver_used(self) -> str:
@@ -623,7 +634,9 @@ class RealtimeFluidSynthPlayer:
     def _simulate_state_until(
         self,
         event_idx: int,
-    ) -> Tuple[Dict[Tuple[int, int], int], Dict[Tuple[int, int], List[int]]]:
+    ) -> Tuple[
+        Dict[Tuple[int, int], int], Dict[Tuple[int, int], List[int]], Dict[Tuple[int, int], int]
+    ]:
         controller_state: Dict[Tuple[int, int], int] = {}
         sustain_down: Dict[int, bool] = defaultdict(bool)
         pressed: Dict[Tuple[int, int], deque[int]] = defaultdict(deque)
@@ -642,7 +655,8 @@ class RealtimeFluidSynthPlayer:
         for i in range(max(0, min(event_idx, len(self._events)))):
             ev = self._events[i]
             if ev.kind == "cc":
-                controller_state[(ev.channel, ev.controller)] = ev.value
+                if ev.controller < 120:
+                    controller_state[(ev.channel, ev.controller)] = ev.value
                 if ev.controller == 64:
                     was_down = bool(sustain_down.get(ev.channel, False))
                     now_down = ev.value >= 64
@@ -669,18 +683,23 @@ class RealtimeFluidSynthPlayer:
         for key, vals in sounding.items():
             if vals:
                 sounding_out[key] = list(vals)
-        return controller_state, sounding_out
+        return controller_state, sounding_out, {key: len(vals) for key, vals in pressed.items()}
 
     def seek(self, at_time: float) -> None:
         t = max(0.0, float(at_time))
         self.all_notes_off()
         self._event_idx = bisect_left(self._event_keys, (t, 3))
-        controller_state, sounding = self._simulate_state_until(self._event_idx)
+        controller_state, sounding, pressed_counts = self._simulate_state_until(self._event_idx)
+        for (channel, controller), value in sorted(self._initial_controller_state.items()):
+            self._cc(channel, controller, value)
         for (channel, controller), value in sorted(controller_state.items()):
             self._cc(channel, controller, value)
         for (channel, note), vels in sorted(sounding.items()):
-            for vel in vels:
+            held_count = len(vels) - pressed_counts.get((channel, note), 0)
+            for index, vel in enumerate(vels):
                 self._note_on(channel, note, vel)
+                if index < held_count:
+                    self._note_off(channel, note)
 
     def update(self, at_time: float) -> None:
         t = max(0.0, float(at_time))

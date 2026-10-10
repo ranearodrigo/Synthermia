@@ -610,11 +610,11 @@ def _prepare_audio_routing(
         getattr(args, "track_instruments", {}),
         valid_pairs_by_sf=valid_pairs_by_sf,
     )
-    audio_spans, channel_programs, channel_soundfonts, source_channels, track_default_channels = (
+    audio_spans, channel_programs, channel_soundfonts, source_channels = (
         _assign_audio_channels(spans, track_programs)
     )
     audio_spans = _apply_track_volume_overrides(audio_spans, getattr(args, "track_volumes", {}))
-    audio_controls = _assign_control_channels(controls, source_channels, track_default_channels)
+    audio_controls = _assign_control_channels(controls, source_channels)
     active_soundfonts = {path.strip() for path in channel_soundfonts.values() if path.strip()}
     return audio_spans, channel_programs, channel_soundfonts, audio_controls, soundfont_paths, len(active_soundfonts) > 1
 
