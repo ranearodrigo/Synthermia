@@ -2,6 +2,8 @@
 
 Terminal Synthesia-style MIDI visualizer with SoundFont playback, live MIDI input, and deep TUI customization.
 
+![Synthermia playing the bundled Glass Steps sample: falling notes, sustain tails, and highlighted piano keys.](docs/demo.gif)
+
 Supported platform: Linux. Live input uses ALSA; desktop media controls use
 MPRIS over the session D-Bus. Windows is unsupported, and macOS is untested.
 
@@ -10,12 +12,17 @@ MPRIS over the session D-Bus. Windows is unsupported, and macOS is untested.
 To run from a source checkout without building the optional native extension:
 
 ```bash
+git clone <repository-url> synthermia
+cd synthermia
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 python main.py --help
-python main.py
+python main.py examples/glass-steps.mid --range 36:84
 ```
+
+Replace `<repository-url>` with the URL of this repository. The bundled sample
+runs without a SoundFont or audio tools. Omit the MIDI argument to open settings.
 
 To install the application and native extension from this checkout, install a
 Rust toolchain first, then run `python -m pip install .`. This installs the
@@ -41,12 +48,14 @@ narrower display. Playback recalculates its layout when the terminal is resized;
 if the selected layout no longer fits, it exits with the required dimensions.
 
 Required for SoundFont audio:
-- FluidSynth runtime (`fluidsynth` CLI)
 - A SoundFont file (`.sf2` / `.sf3`)
 
 Required for in-process audio engine (`--audio-engine python`, default):
 - `pyFluidSynth` Python module (`pip install pyfluidsynth` or distro equivalent)
 - System `libfluidsynth`
+
+Required for the CLI audio engine and MP3 export:
+- FluidSynth runtime (`fluidsynth` CLI)
 
 Required for live MIDI input mode:
 - `aseqdump` from `alsa-utils`
@@ -67,19 +76,33 @@ Optional (desktop/headphone media controls):
 
 ## Quick Start
 
+Try the bundled original sample (visualization only):
+
+```bash
+python3 main.py examples/glass-steps.mid --range 36:84
+```
+
+`Glass Steps` is an original 16-second, two-track piano piece distributed under
+this repository's MIT license. The range above fits an 80-column terminal and
+shows every note in the sample. The preview shows the full keyboard in a
+112-column terminal. Add `--soundfont /path/to/piano.sf2` to hear it.
+
 Launch the interactive TUI config screen (pick MIDI, SoundFont, and settings):
 
 ```bash
 python3 main.py
 ```
 
-When using the project's `uv` environment through `mise`:
+If you already use `uv` and `mise`:
 
 ```bash
 mise x -- uv run main.py
 ```
 
-Or launch directly with a MIDI file:
+This installs the project, including the native extension, and requires Rust
+for a local build. The source-checkout instructions above avoid that build.
+
+Or launch directly with your own MIDI file:
 
 ```bash
 python3 main.py midis/your_file.mid --soundfont Steinway_D-274.sf2
@@ -116,11 +139,10 @@ and `.synthermia_profiles.json` files in the launch directory are read when the
 corresponding user config file does not exist; the next save uses the user config
 directory and leaves the old files untouched.
 
-## Functionalities
+## Features
 
 - Terminal piano-roll rendering with Unicode glyphs
 - Multi-track parsing with tempo map, time signatures, controls, and note span generation
-
 - Stuck-note mitigation modes (`auto`, `off`, `lifo`) for imperfect MIDI files
 - Optional long-note cleanup that caps malformed note durations without extending ordinary notes
 - Optional measure bars in playfield
@@ -185,7 +207,8 @@ Synthermia can run entirely in pure Python, but it now has an optional packed pl
 
 If the native extension is not installed, Synthermia falls back to a Python packed representation instead of failing.
 
-To build the extension locally:
+To build the extension locally, install a Rust toolchain and activate the Python
+virtual environment created above. `requirements.txt` includes `maturin`:
 
 ```bash
 maturin develop
@@ -209,5 +232,11 @@ and background packed loading. The wheel check installs into a temporary
 environment and checks both launch commands outside the checkout. CI runs the
 suite on Python 3.10 and 3.14 and verifies a wheel built from the source archive.
 
-The code is distributed under the [MIT license](LICENSE). Supply your own
-SoundFonts and MIDI files; they are separate from the application distribution.
+To regenerate the sample, run `python3 -m tools.generate_sample`. To record the
+10-second terminal preview, install the optional recording dependencies with
+`python3 -m pip install Pillow pyte`, then run `python3 tools/record_demo.py`.
+The recorder uses a temporary settings directory and leaves personal settings
+untouched. Use `--font /path/to/monospace.ttf` if DejaVu Sans Mono is unavailable.
+
+The code and bundled sample are distributed under the [MIT license](LICENSE).
+SoundFonts and any other MIDI files you supply retain their own licenses.

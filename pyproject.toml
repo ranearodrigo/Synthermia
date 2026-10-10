@@ -36,4 +36,8 @@ include = [
   { path = "main.py", format = "sdist" },
   { path = "tests/**/*.py", format = "sdist" },
   { path = "tools/check_wheel.py", format = "sdist" },
+  { path = "tools/generate_sample.py", format = "sdist" },
+  { path = "tools/record_demo.py", format = "sdist" },
+  { path = "examples/*.mid", format = "sdist" },
+  { path = "docs/demo.gif", format = "sdist" },
 ]
