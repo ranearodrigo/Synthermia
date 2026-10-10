@@ -1,4 +1,6 @@
 import os
+import curses
+from contextlib import ExitStack
 import subprocess
 import sys
 import tempfile
@@ -11,9 +13,56 @@ from synthermia.midi import load_playback_source
 from synthermia.models import ControlEvent, NoteSpan
 from synthermia.playback import write_demo_midi_file
 from synthermia.tui import _run_export_process, export_configured_midi_to_mp3
+from synthermia import tui
 
 
 class ExportTests(unittest.TestCase):
+    def test_config_screen_exports_current_snapshot(self):
+        class Screen:
+            def __init__(self):
+                self.keys = iter([curses.KEY_END, curses.KEY_UP, 10, ord("p")])
+
+            def getch(self):
+                return next(self.keys)
+
+            def getmaxyx(self):
+                return 40, 120
+
+            def erase(self):
+                pass
+
+            def box(self):
+                pass
+
+            def addstr(self, *args):
+                pass
+
+            def refresh(self):
+                pass
+
+            def keypad(self, value):
+                pass
+
+        settings = {"midi_flip": True, "disable_pedal": True, "range": "36:84", "speed": 2.0}
+        with ExitStack() as stack:
+            for name, value in {
+                "load_last_config": settings, "load_config_profiles": [],
+                "scan_files_by_ext": [], "list_audio_output_targets": [],
+                "save_last_config": None, "_edit_text_popup": "/tmp/example.mp3",
+                "_message_popup": None,
+            }.items():
+                stack.enter_context(patch.object(tui, name, return_value=value))
+            stack.enter_context(patch.object(tui.curses, "wrapper", side_effect=lambda fn: fn(Screen())))
+            stack.enter_context(patch.object(tui.curses, "has_colors", return_value=False))
+            stack.enter_context(patch.object(tui.curses, "curs_set"))
+            stack.enter_context(patch.object(tui.curses, "set_escdelay"))
+            export = stack.enter_context(patch.object(tui, "export_configured_midi_to_mp3", return_value="/tmp/example.mp3"))
+            tui.run_config_screen(parse_args([]))
+            self.assertEqual(export.call_count, 1)
+            exported = export.call_args.args[0]
+            for key, value in settings.items():
+                self.assertEqual(getattr(exported, key), value)
+
     def test_noisy_child_completes(self):
         _run_export_process(
             [sys.executable, "-c", "import sys; sys.stderr.write('x' * 1000000)"],
