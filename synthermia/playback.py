@@ -581,6 +581,11 @@ def _playback_layout(
     if x_scale != args.x_scale:
         print(f"Note: --x-scale {args.x_scale} does not fit terminal width; using {x_scale}.", file=sys.stderr)
     frame_cols = keyboard_width(note_lo, note_hi, x_scale)
+    if not bool(getattr(args, "hide_piano", False)) and frame_cols + 4 > term_size.columns:
+        raise ValueError(
+            f"Terminal too narrow for the selected note range; need at least {frame_cols + 4} columns. "
+            "Widen the terminal or select a smaller --range."
+        )
     return term_size, rows, rows - kb_rows, note_lo, note_hi, x_scale, frame_cols
 
 
@@ -1137,6 +1142,9 @@ def playback(
 
         while True:
             now = time.perf_counter()
+            if shutil.get_terminal_size(fallback=(120, 36)) != term_size:
+                term_size, rows, play_rows, note_lo, note_hi, effective_x_scale, frame_cols = _playback_layout(args, spans_active)
+                _safe_stdout_write("\x1b[2J")
             if not paused:
                 update_play_time(now)
                 if py_audio is not None:
@@ -1726,6 +1734,11 @@ def playback_live_midi_input(args: argparse.Namespace) -> None:
         while True:
             now_perf = time.perf_counter()
             play_t = max(0.0, now_perf - start_perf)
+            if shutil.get_terminal_size(fallback=(120, 36)) != term_size:
+                term_size, rows, play_rows, note_lo, note_hi, effective_x_scale, frame_cols = _playback_layout(args, [])
+                keep_window_sec = (play_rows / max(1.0, float(args.drop_speed))) + 1.5
+                scroll_window_sec = play_rows / max(1e-6, float(args.drop_speed))
+                _safe_stdout_write("\x1b[2J")
 
             for ev in poll_midi_events(play_t):
                 process_live_event(ev)

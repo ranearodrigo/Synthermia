@@ -8,6 +8,10 @@ Required (core app):
 - Python 3.10+
 - A UTF-8 terminal with ANSI color support
 
+The full keyboard needs at least 108 terminal columns. Use `--range 21:60` for a
+narrower display. Playback recalculates its layout when the terminal is resized;
+if the selected layout no longer fits, it exits with the required dimensions.
+
 Required for SoundFont audio:
 - FluidSynth runtime (`fluidsynth` CLI)
 - A SoundFont file (`.sf2` / `.sf3`)
