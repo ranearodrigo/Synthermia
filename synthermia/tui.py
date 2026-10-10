@@ -1258,10 +1258,10 @@ def run_config_screen(args: argparse.Namespace) -> argparse.Namespace:
                 state[key] = round(val, 3)
             else:
                 return False
-            persist_state()
-            return True
-        except Exception:
+        except (ValueError, OverflowError):
             return False
+        persist_state()
+        return True
 
     def choose_file_by_ext(
         stdscr: "curses._CursesWindow",

@@ -1,3 +1,5 @@
+import curses
+from contextlib import ExitStack
 import json
 import os
 import tempfile
@@ -5,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from main import parse_args
+from synthermia import tui
 from synthermia.config import load_config_profiles, load_last_config, save_config_profiles, save_last_config
 
 
@@ -63,3 +67,44 @@ class ConfigTests(unittest.TestCase):
         path.write_text("{")
         with self.assertRaises(json.JSONDecodeError):
             load_last_config(str(path))
+
+    def test_numeric_setting_save_failure_is_reported(self):
+        class Screen:
+            keys = iter([ord("/"), *map(ord, "Playback Speed"), 10, curses.KEY_END, 10, ord("q")])
+
+            def getch(self):
+                return next(self.keys)
+
+            def getmaxyx(self):
+                return 40, 120
+
+            def erase(self):
+                pass
+
+            def box(self):
+                pass
+
+            def addstr(self, *args):
+                pass
+
+            def refresh(self):
+                pass
+
+            def keypad(self, value):
+                pass
+
+        with ExitStack() as stack:
+            for name, value in {
+                "load_last_config": {}, "load_config_profiles": [],
+                "scan_files_by_ext": [], "list_audio_output_targets": [],
+                "_edit_text_popup": "2.0",
+            }.items():
+                stack.enter_context(patch.object(tui, name, return_value=value))
+            save = stack.enter_context(patch.object(tui, "save_last_config", side_effect=OSError("disk full")))
+            stack.enter_context(patch.object(tui.curses, "wrapper", side_effect=lambda fn: fn(Screen())))
+            stack.enter_context(patch.object(tui.curses, "has_colors", return_value=False))
+            stack.enter_context(patch.object(tui.curses, "curs_set"))
+            stack.enter_context(patch.object(tui.curses, "set_escdelay"))
+            with self.assertRaisesRegex(OSError, "disk full"):
+                tui.run_config_screen(parse_args([]))
+            self.assertEqual(save.call_args.args[0]["speed"], 2.0)
