@@ -17,7 +17,7 @@ try:
         native_runtime_info,
         start_packed_playback_load_task_native,
     )
-except Exception:
+except ImportError:
     load_packed_playback_source_native = None
     native_runtime_info = None
     start_packed_playback_load_task_native = None
@@ -535,38 +535,35 @@ def load_selected_playback_data(
 
     if use_packed:
         if native_packed_available():
-            try:
-                flip_lo = None
-                flip_hi = None
-                if flip_bounds is not None:
-                    flip_lo = int(flip_bounds[0])
-                    flip_hi = int(flip_bounds[1])
-                native_source = load_packed_playback_source_native(
-                    midi_path,
-                    str(stuck_note_fix_mode),
-                    bool(midi_flip),
-                    flip_lo,
-                    flip_hi,
-                    max(0.0, float(long_note_threshold)),
-                    max(0.0, float(long_note_duration)),
-                )
-                native_controls = _coerce_control_events(native_source.control_tuples())
-                native_measure_times = [float(value) for value in native_source.measure_times()]
-                native_note_diag = {
-                    key: int(value) for key, value in dict(native_source.note_diag()).items()
-                }
-                packed_source = PackedPlaybackSource.from_native(
-                    native_source=native_source,
-                    controls=native_controls,
-                    measure_times=native_measure_times,
-                    note_diag=native_note_diag,
-                )
-                controls = native_controls
-                measure_times = native_measure_times
-                note_diag = native_note_diag
-                native_backend = True
-            except Exception:
-                native_backend = False
+            flip_lo = None
+            flip_hi = None
+            if flip_bounds is not None:
+                flip_lo = int(flip_bounds[0])
+                flip_hi = int(flip_bounds[1])
+            native_source = load_packed_playback_source_native(
+                midi_path,
+                str(stuck_note_fix_mode),
+                bool(midi_flip),
+                flip_lo,
+                flip_hi,
+                max(0.0, float(long_note_threshold)),
+                max(0.0, float(long_note_duration)),
+            )
+            native_controls = _coerce_control_events(native_source.control_tuples())
+            native_measure_times = [float(value) for value in native_source.measure_times()]
+            native_note_diag = {
+                key: int(value) for key, value in dict(native_source.note_diag()).items()
+            }
+            packed_source = PackedPlaybackSource.from_native(
+                native_source=native_source,
+                controls=native_controls,
+                measure_times=native_measure_times,
+                note_diag=native_note_diag,
+            )
+            controls = native_controls
+            measure_times = native_measure_times
+            note_diag = native_note_diag
+            native_backend = True
         engine_used = "packed"
         if packed_source is None:
             spans, controls, measure_times, note_diag = load_playback_source(

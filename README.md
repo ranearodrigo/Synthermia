@@ -86,6 +86,10 @@ Settings are persisted to `.synthermia_last_config.json` and restored on next la
 
 - Terminal piano-roll rendering with Unicode glyphs
 - Multi-track parsing with tempo map, time signatures, controls, and note span generation
+
+MIDI formats 0 and 1 with a positive ticks-per-quarter-note time division are
+supported. Format 2 and SMPTE timing are unsupported. Malformed headers, track
+chunks, event data, and tempo values are reported as input errors in both loaders.
 - Stuck-note mitigation modes (`auto`, `off`, `lifo`) for imperfect MIDI files
 - Optional long-note cleanup that caps malformed note durations without extending ordinary notes
 - Optional measure bars in playfield

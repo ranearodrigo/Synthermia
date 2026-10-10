@@ -18,26 +18,34 @@ from synthermia.models import (
 
 try:
     from synthermia_native import parse_midi_track_summaries_native
-except Exception:
+except ImportError:
     parse_midi_track_summaries_native = None
 
 
 def read_u32_be(data: bytes, i: int) -> Tuple[int, int]:
-    return struct.unpack(">I", data[i : i + 4])[0], i + 4
+    if i + 4 > len(data):
+        raise ValueError("Invalid MIDI: truncated u32")
+    return struct.unpack_from(">I", data, i)[0], i + 4
 
 
 def read_u16_be(data: bytes, i: int) -> Tuple[int, int]:
-    return struct.unpack(">H", data[i : i + 2])[0], i + 2
+    if i + 2 > len(data):
+        raise ValueError("Invalid MIDI: truncated u16")
+    return struct.unpack_from(">H", data, i)[0], i + 2
 
 
-def read_varlen(data: bytes, i: int) -> Tuple[int, int]:
+def read_varlen(data: bytes, i: int, end: Optional[int] = None) -> Tuple[int, int]:
+    limit = len(data) if end is None else end
     value = 0
-    while True:
+    for _ in range(4):
+        if i >= limit:
+            raise ValueError("Invalid MIDI: truncated varlen")
         b = data[i]
         i += 1
         value = (value << 7) | (b & 0x7F)
         if not (b & 0x80):
             return value, i
+    raise ValueError("Invalid MIDI: varlen exceeds four bytes")
 
 
 def write_varlen(value: int) -> bytes:
@@ -51,261 +59,130 @@ def write_varlen(value: int) -> bytes:
     return bytes(reversed(buf))
 
 
-def parse_midi(path: str) -> Tuple[MidiHeader, List[RawEvent]]:
+def _read_midi_file(path: str) -> Tuple[MidiHeader, bytes, List[Tuple[int, int]]]:
     with open(path, "rb") as f:
         data = f.read()
-
-    i = 0
-    if data[i : i + 4] != b"MThd":
+    if data[:4] != b"MThd":
         raise ValueError("Invalid MIDI: missing MThd header")
-    i += 4
-    hdr_len, i = read_u32_be(data, i)
+    hdr_len, i = read_u32_be(data, 4)
     if hdr_len < 6:
         raise ValueError("Invalid MIDI: bad header length")
-
+    if i + hdr_len > len(data):
+        raise ValueError("Invalid MIDI: truncated header")
     fmt, i = read_u16_be(data, i)
     ntrks, i = read_u16_be(data, i)
     division, i = read_u16_be(data, i)
     i += hdr_len - 6
-
-    header = MidiHeader(fmt=fmt, ntrks=ntrks, division=division)
+    if fmt not in (0, 1):
+        raise ValueError("Invalid MIDI: only formats 0 and 1 are supported")
+    if ntrks == 0 or (fmt == 0 and ntrks != 1):
+        raise ValueError("Invalid MIDI: bad track count")
     if division & 0x8000:
         raise ValueError("SMPTE time division is not supported")
-
-    events: List[RawEvent] = []
-
-    for track_idx in range(ntrks):
+    if division == 0:
+        raise ValueError("Invalid MIDI: time division must be positive")
+    tracks = []
+    for _ in range(ntrks):
         if data[i : i + 4] != b"MTrk":
             raise ValueError("Invalid MIDI: missing MTrk chunk")
-        i += 4
-        trk_len, i = read_u32_be(data, i)
-        trk_end = i + trk_len
+        length, i = read_u32_be(data, i + 4)
+        end = i + length
+        if end > len(data):
+            raise ValueError("Invalid MIDI: truncated track chunk")
+        tracks.append((i, end))
+        i = end
+    return MidiHeader(fmt, ntrks, division), data, tracks
 
-        abs_tick = 0
-        running_status: Optional[int] = None
 
-        while i < trk_end:
-            delta, i = read_varlen(data, i)
-            abs_tick += delta
+def _iter_track_events(data: bytes, start: int, end: int):
+    i = start
+    tick = 0
+    running_status = None
+    while i < end:
+        delta, i = read_varlen(data, i, end)
+        tick += delta
+        if i >= end:
+            raise ValueError("Invalid MIDI: truncated event")
+        status = data[i]
+        if status < 0x80:
+            if running_status is None:
+                raise ValueError("Invalid MIDI: running status missing")
+            status = running_status
+        else:
+            i += 1
+            running_status = status if status < 0xF0 else None
+        meta_type = None
+        if status == 0xFF:
+            if i >= end:
+                raise ValueError("Invalid MIDI: truncated meta event")
+            meta_type = data[i]
+            i += 1
+            length, i = read_varlen(data, i, end)
+        elif status in (0xF0, 0xF7):
+            length, i = read_varlen(data, i, end)
+        elif 0x80 <= status <= 0xEF:
+            length = 1 if status & 0xF0 in (0xC0, 0xD0) else 2
+        else:
+            raise ValueError("Invalid MIDI: unsupported status byte")
+        if i + length > end:
+            raise ValueError("Invalid MIDI: truncated event payload")
+        payload = data[i : i + length]
+        i += length
+        if status < 0xF0 and any(value >= 0x80 for value in payload):
+            raise ValueError("Invalid MIDI: channel data must be seven-bit")
+        if meta_type == 0x51 and (length != 3 or int.from_bytes(payload, "big") == 0):
+            raise ValueError("Invalid MIDI: bad tempo")
+        yield tick, status, meta_type, payload
 
-            status = data[i]
-            if status < 0x80:
-                if running_status is None:
-                    raise ValueError("Invalid MIDI: running status missing")
-                status = running_status
-            else:
-                i += 1
-                running_status = status if status < 0xF0 else None
 
-            if status == 0xFF:
-                meta_type = data[i]
-                i += 1
-                length, i = read_varlen(data, i)
-                payload = data[i : i + length]
-                i += length
-
-                if meta_type == 0x51 and length == 3:
-                    tempo = (payload[0] << 16) | (payload[1] << 8) | payload[2]
-                    events.append(
-                        RawEvent(
-                            tick=abs_tick,
-                            order=0,
-                            kind="tempo",
-                            track=track_idx,
-                            tempo_us_per_qn=tempo,
-                        )
-                    )
-                elif meta_type == 0x58 and length >= 2:
-                    numer = int(payload[0]) if len(payload) >= 1 else 4
-                    denom_pow = int(payload[1]) if len(payload) >= 2 else 2
-                    denom = 1 << max(0, min(7, denom_pow))
-                    if numer > 0 and denom > 0:
-                        events.append(
-                            RawEvent(
-                                tick=abs_tick,
-                                order=0,
-                                kind="time_signature",
-                                track=track_idx,
-                                time_sig_numerator=numer,
-                                time_sig_denominator=denom,
-                            )
-                        )
-                continue
-
-            if status in (0xF0, 0xF7):
-                length, i = read_varlen(data, i)
-                i += length
-                continue
-
-            msg_type = status & 0xF0
-            channel = status & 0x0F
-
-            if msg_type in (0xC0, 0xD0):
-                i += 1
-                continue
-
-            p1 = data[i]
-            p2 = data[i + 1]
-            i += 2
-
-            if msg_type == 0xB0:
-                events.append(
-                    RawEvent(
-                        tick=abs_tick,
-                        order=1,
-                        kind="control_change",
-                        channel=channel,
-                        track=track_idx,
-                        controller=p1,
-                        value=p2,
-                    )
-                )
-            elif msg_type == 0x90:
-                note = p1
-                vel = p2
-                if vel == 0:
-                    events.append(
-                        RawEvent(
-                            tick=abs_tick,
-                            order=1,
-                            kind="note_off",
-                            note=note,
-                            velocity=vel,
-                            channel=channel,
-                            track=track_idx,
-                        )
-                    )
-                else:
-                    events.append(
-                        RawEvent(
-                            tick=abs_tick,
-                            order=2,
-                            kind="note_on",
-                            note=note,
-                            velocity=vel,
-                            channel=channel,
-                            track=track_idx,
-                        )
-                    )
-            elif msg_type == 0x80:
-                events.append(
-                    RawEvent(
-                        tick=abs_tick,
-                        order=1,
-                        kind="note_off",
-                        note=p1,
-                        velocity=p2,
-                        channel=channel,
-                        track=track_idx,
-                    )
-                )
-
-        i = trk_end
-
+def parse_midi(path: str) -> Tuple[MidiHeader, List[RawEvent]]:
+    header, data, tracks = _read_midi_file(path)
+    events: List[RawEvent] = []
+    for track_idx, (start, end) in enumerate(tracks):
+        for tick, status, meta_type, payload in _iter_track_events(data, start, end):
+            if meta_type == 0x51:
+                events.append(RawEvent(tick=tick, order=0, kind="tempo", track=track_idx,
+                                       tempo_us_per_qn=int.from_bytes(payload, "big")))
+            elif meta_type == 0x58 and len(payload) >= 2:
+                numer, denom_pow = payload[:2]
+                if numer > 0:
+                    events.append(RawEvent(tick=tick, order=0, kind="time_signature", track=track_idx,
+                                           time_sig_numerator=numer, time_sig_denominator=1 << min(7, denom_pow)))
+            elif status < 0xF0:
+                msg_type = status & 0xF0
+                channel = status & 0x0F
+                if msg_type == 0xB0:
+                    events.append(RawEvent(tick=tick, order=1, kind="control_change", channel=channel,
+                                           track=track_idx, controller=payload[0], value=payload[1]))
+                elif msg_type in (0x80, 0x90):
+                    note_on = msg_type == 0x90 and payload[1] > 0
+                    events.append(RawEvent(tick=tick, order=2 if note_on else 1,
+                                           kind="note_on" if note_on else "note_off", note=payload[0],
+                                           velocity=payload[1], channel=channel, track=track_idx))
     events.sort(key=lambda e: (e.tick, e.order))
     return header, events
 
 
 def parse_midi_track_summaries(path: str) -> List[MidiTrackSummary]:
     if callable(parse_midi_track_summaries_native):
-        try:
-            return [
-                MidiTrackSummary(
-                    index=int(index),
-                    name=str(name),
-                    note_ons=int(note_ons),
-                    instrument_name=str(instrument_name),
-                )
-                for index, name, note_ons, instrument_name in parse_midi_track_summaries_native(path)
-            ]
-        except Exception:
-            pass
-
-    with open(path, "rb") as f:
-        data = f.read()
-
-    i = 0
-    if data[i : i + 4] != b"MThd":
-        raise ValueError("Invalid MIDI: missing MThd header")
-    i += 4
-    hdr_len, i = read_u32_be(data, i)
-    if hdr_len < 6:
-        raise ValueError("Invalid MIDI: bad header length")
-    _fmt, i = read_u16_be(data, i)
-    ntrks, i = read_u16_be(data, i)
-    division, i = read_u16_be(data, i)
-    i += hdr_len - 6
-    if division & 0x8000:
-        raise ValueError("SMPTE time division is not supported")
-
-    summaries: List[MidiTrackSummary] = []
-    for track_idx in range(ntrks):
-        if data[i : i + 4] != b"MTrk":
-            raise ValueError("Invalid MIDI: missing MTrk chunk")
-        i += 4
-        trk_len, i = read_u32_be(data, i)
-        trk_end = i + trk_len
-        running_status: Optional[int] = None
-        note_ons = 0
-        track_name = f"Track {track_idx + 1}"
+        return [
+            MidiTrackSummary(index=int(index), name=str(name), note_ons=int(note_ons), instrument_name=str(instrument))
+            for index, name, note_ons, instrument in parse_midi_track_summaries_native(path)
+        ]
+    _header, data, tracks = _read_midi_file(path)
+    summaries = []
+    for track_idx, (start, end) in enumerate(tracks):
+        track_name = ""
         instrument_name = ""
-        name_seen = False
-        instrument_seen = False
-
-        while i < trk_end:
-            _delta, i = read_varlen(data, i)
-            status = data[i]
-            if status < 0x80:
-                if running_status is None:
-                    raise ValueError("Invalid MIDI: running status missing")
-                status = running_status
-            else:
-                i += 1
-                running_status = status if status < 0xF0 else None
-
-            if status == 0xFF:
-                meta_type = data[i]
-                i += 1
-                length, i = read_varlen(data, i)
-                payload = data[i : i + length]
-                i += length
-                if meta_type == 0x03 and not name_seen:
-                    name_txt = _clean_midi_text(payload)
-                    if name_txt:
-                        track_name = name_txt
-                        name_seen = True
-                elif meta_type == 0x04 and not instrument_seen:
-                    inst_txt = _clean_midi_text(payload)
-                    if inst_txt:
-                        instrument_name = inst_txt
-                        instrument_seen = True
-                continue
-
-            if status in (0xF0, 0xF7):
-                length, i = read_varlen(data, i)
-                i += length
-                continue
-
-            msg_type = status & 0xF0
-            if msg_type in (0xC0, 0xD0):
-                i += 1
-                continue
-
-            _p1 = data[i]
-            p2 = data[i + 1]
-            i += 2
-            if msg_type == 0x90 and p2 > 0:
+        note_ons = 0
+        for _tick, status, meta_type, payload in _iter_track_events(data, start, end):
+            if meta_type == 0x03 and not track_name:
+                track_name = _clean_midi_text(payload)
+            elif meta_type == 0x04 and not instrument_name:
+                instrument_name = _clean_midi_text(payload)
+            elif status & 0xF0 == 0x90 and payload[1] > 0:
                 note_ons += 1
-
-        i = trk_end
-        summaries.append(
-            MidiTrackSummary(
-                index=track_idx,
-                name=track_name,
-                note_ons=note_ons,
-                instrument_name=instrument_name,
-            )
-        )
+        summaries.append(MidiTrackSummary(track_idx, track_name or f"Track {track_idx + 1}", note_ons, instrument_name))
     return summaries
 
 

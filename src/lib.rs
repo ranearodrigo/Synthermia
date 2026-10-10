@@ -940,26 +940,7 @@ fn parse_midi_file_with_progress(
 }
 
 fn parse_midi_track_summaries_bytes(data: &[u8]) -> PyResult<Vec<(u32, String, u32, String)>> {
-    let mut i = 0usize;
-    ensure_chunk(data, i, b"MThd", "missing MThd header")?;
-    i += 4;
-    let (hdr_len, i2) = read_u32_be(data, i)?;
-    i = i2;
-    if hdr_len < 6 {
-        return Err(PyValueError::new_err("Invalid MIDI: bad header length"));
-    }
-
-    let (_fmt, i2) = read_u16_be(data, i)?;
-    i = i2;
-    let (ntrks, i2) = read_u16_be(data, i)?;
-    i = i2;
-    let (division, i2) = read_u16_be(data, i)?;
-    i = i2;
-    i = i.saturating_add(hdr_len as usize - 6);
-
-    if division & 0x8000 != 0 {
-        return Err(PyValueError::new_err("SMPTE time division is not supported"));
-    }
+    let (_division, ntrks, mut i) = parse_midi_header(data)?;
 
     let mut summaries = Vec::with_capacity(ntrks as usize);
     for track_idx in 0..ntrks {
@@ -971,6 +952,8 @@ fn parse_midi_track_summaries_bytes(data: &[u8]) -> PyResult<Vec<(u32, String, u
         if trk_end > data.len() {
             return Err(PyValueError::new_err("Invalid MIDI: truncated MTrk chunk"));
         }
+
+        let data = &data[..trk_end];
 
         let mut running_status: Option<u8> = None;
         let mut note_ons = 0u32;
@@ -1006,6 +989,7 @@ fn parse_midi_track_summaries_bytes(data: &[u8]) -> PyResult<Vec<(u32, String, u
                     .get(i..payload_end)
                     .ok_or_else(|| PyValueError::new_err("Invalid MIDI: truncated meta payload"))?;
                 i = payload_end;
+                validate_tempo(meta_type, payload)?;
                 if meta_type == 0x03 && !name_seen {
                     let txt = latin1_trimmed(payload);
                     if !txt.is_empty() {
@@ -1032,21 +1016,8 @@ fn parse_midi_track_summaries_bytes(data: &[u8]) -> PyResult<Vec<(u32, String, u
             }
 
             let msg_type = status & 0xF0;
-            if matches!(msg_type, 0xC0 | 0xD0) {
-                i = i.saturating_add(1);
-                if i > trk_end {
-                    return Err(PyValueError::new_err("Invalid MIDI: truncated channel event"));
-                }
-                continue;
-            }
-
-            let _p1 = *data
-                .get(i)
-                .ok_or_else(|| PyValueError::new_err("Invalid MIDI: truncated event payload"))?;
-            let p2 = *data
-                .get(i + 1)
-                .ok_or_else(|| PyValueError::new_err("Invalid MIDI: truncated event payload"))?;
-            i += 2;
+            let (_p1, p2, next) = read_channel_message(data, i, status)?;
+            i = next;
             if msg_type == 0x90 && p2 > 0 {
                 note_ons = note_ons.saturating_add(1);
             }
@@ -1067,31 +1038,7 @@ fn parse_midi_bytes_with_progress<F>(
 where
     F: FnMut(usize, usize, usize),
 {
-    let mut i = 0usize;
-    ensure_chunk(data, i, b"MThd", "missing MThd header")?;
-    i += 4;
-    let (hdr_len, i2) = read_u32_be(data, i)?;
-    i = i2;
-    if hdr_len < 6 {
-        return Err(PyValueError::new_err("Invalid MIDI: bad header length"));
-    }
-
-    let (_fmt, i2) = read_u16_be(data, i)?;
-    i = i2;
-    let (ntrks, i2) = read_u16_be(data, i)?;
-    i = i2;
-    let (division, i2) = read_u16_be(data, i)?;
-    i = i2;
-    if (division & 0x8000) != 0 {
-        return Err(PyValueError::new_err(
-            "SMPTE time division is not supported",
-        ));
-    }
-    let hdr_len_usize = hdr_len as usize;
-    if i + (hdr_len_usize.saturating_sub(6)) > data.len() {
-        return Err(PyValueError::new_err("Invalid MIDI: truncated header"));
-    }
-    i += hdr_len_usize - 6;
+    let (division, ntrks, mut i) = parse_midi_header(data)?;
 
     let mut track_events: Vec<Vec<RawEvent>> = Vec::with_capacity(ntrks as usize);
     let total_tracks = ntrks as usize;
@@ -1110,6 +1057,8 @@ where
         if trk_end > data.len() {
             return Err(PyValueError::new_err("Invalid MIDI: truncated track chunk"));
         }
+
+        let data = &data[..trk_end];
 
         let mut events: Vec<RawEvent> = Vec::new();
         let mut abs_tick: u64 = 0;
@@ -1150,6 +1099,7 @@ where
                 }
                 let payload = &data[i..i + len];
                 i += len;
+                validate_tempo(meta_type, payload)?;
 
                 if meta_type == 0x51 && len == 3 {
                     let tempo =
@@ -1184,25 +1134,8 @@ where
 
             let msg_type = status & 0xF0;
             let channel = status & 0x0F;
-
-            if msg_type == 0xC0 || msg_type == 0xD0 {
-                if i >= trk_end {
-                    return Err(PyValueError::new_err(
-                        "Invalid MIDI: truncated short message",
-                    ));
-                }
-                i += 1;
-                continue;
-            }
-
-            let p1 = *data
-                .get(i)
-                .ok_or_else(|| PyValueError::new_err("Invalid MIDI: truncated message"))?;
-            let p2 = *data
-                .get(i + 1)
-                .ok_or_else(|| PyValueError::new_err("Invalid MIDI: truncated message"))?;
-            i += 2;
-
+            let (p1, p2, next) = read_channel_message(data, i, status)?;
+            i = next;
             match msg_type {
                 0xB0 => events.push(RawEvent::control_change(
                     abs_tick,
@@ -1266,28 +1199,6 @@ fn build_native_rows_streaming<F>(
 where
     F: FnMut(BuildProgress),
 {
-    if ticks_per_qn == 0 {
-        return Ok(NativeBuildRows {
-            start_sec: Vec::new(),
-            end_sec: Vec::new(),
-            note: Vec::new(),
-            velocity: Vec::new(),
-            channel: Vec::new(),
-            track: Vec::new(),
-            by_end: Vec::new(),
-            controls: Vec::new(),
-            measure_times: Vec::new(),
-            note_diag: NoteDiagnostics {
-                stuck_note_fix_mode: 0,
-                overlap_fixes: 0,
-                orphan_note_offs: 0,
-                long_note_trims: 0,
-                remaining_unmatched_note_ons: 0,
-            },
-            duration_sec: 0.0,
-        });
-    }
-
     let mode = normalize_stuck_note_fix_mode(stuck_note_fix_mode);
     let long_note_threshold = long_note_threshold.max(0.0);
     let long_note_duration = long_note_duration.max(0.0);
@@ -1743,6 +1654,53 @@ fn apply_midi_flip(notes: &mut [u8], flip_lo: Option<u8>, flip_hi: Option<u8>) {
     }
 }
 
+fn parse_midi_header(data: &[u8]) -> PyResult<(u16, u16, usize)> {
+    ensure_chunk(data, 0, b"MThd", "missing MThd header")?;
+    let (hdr_len, i) = read_u32_be(data, 4)?;
+    if hdr_len < 6 {
+        return Err(PyValueError::new_err("Invalid MIDI: bad header length"));
+    }
+    let end = i.checked_add(hdr_len as usize)
+        .filter(|end| *end <= data.len())
+        .ok_or_else(|| PyValueError::new_err("Invalid MIDI: truncated header"))?;
+    let (fmt, i) = read_u16_be(data, i)?;
+    let (ntrks, i) = read_u16_be(data, i)?;
+    let (division, _) = read_u16_be(data, i)?;
+    if fmt > 1 {
+        return Err(PyValueError::new_err("Invalid MIDI: only formats 0 and 1 are supported"));
+    }
+    if ntrks == 0 || (fmt == 0 && ntrks != 1) {
+        return Err(PyValueError::new_err("Invalid MIDI: bad track count"));
+    }
+    if division & 0x8000 != 0 {
+        return Err(PyValueError::new_err("SMPTE time division is not supported"));
+    }
+    if division == 0 {
+        return Err(PyValueError::new_err("Invalid MIDI: time division must be positive"));
+    }
+    Ok((division, ntrks, end))
+}
+
+fn validate_tempo(meta_type: u8, payload: &[u8]) -> PyResult<()> {
+    if meta_type == 0x51 && (payload.len() != 3 || payload.iter().all(|byte| *byte == 0)) {
+        return Err(PyValueError::new_err("Invalid MIDI: bad tempo"));
+    }
+    Ok(())
+}
+
+fn read_channel_message(data: &[u8], i: usize, status: u8) -> PyResult<(u8, u8, usize)> {
+    if !(0x80..=0xEF).contains(&status) {
+        return Err(PyValueError::new_err("Invalid MIDI: unsupported status byte"));
+    }
+    let length = if matches!(status & 0xF0, 0xC0 | 0xD0) { 1 } else { 2 };
+    let payload = data.get(i..i + length)
+        .ok_or_else(|| PyValueError::new_err("Invalid MIDI: truncated event payload"))?;
+    if payload.iter().any(|byte| *byte >= 0x80) {
+        return Err(PyValueError::new_err("Invalid MIDI: channel data must be seven-bit"));
+    }
+    Ok((payload[0], if length == 2 { payload[1] } else { 0 }, i + length))
+}
+
 fn ensure_chunk(data: &[u8], i: usize, expected: &[u8; 4], message: &str) -> PyResult<()> {
     let Some(chunk) = data.get(i..i + 4) else {
         return Err(PyValueError::new_err(format!("Invalid MIDI: {message}")));
@@ -1772,7 +1730,7 @@ fn read_u32_be(data: &[u8], i: usize) -> PyResult<(u32, usize)> {
 
 fn read_varlen(data: &[u8], mut i: usize) -> PyResult<(u64, usize)> {
     let mut value = 0u64;
-    loop {
+    for _ in 0..4 {
         let byte = *data
             .get(i)
             .ok_or_else(|| PyValueError::new_err("Invalid MIDI: truncated varlen"))?;
@@ -1782,6 +1740,7 @@ fn read_varlen(data: &[u8], mut i: usize) -> PyResult<(u64, usize)> {
             return Ok((value, i));
         }
     }
+    Err(PyValueError::new_err("Invalid MIDI: varlen exceeds four bytes"))
 }
 
 fn latin1_trimmed(bytes: &[u8]) -> String {
