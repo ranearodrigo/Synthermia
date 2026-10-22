@@ -12,7 +12,7 @@ MPRIS over the session D-Bus. Windows is unsupported, and macOS is untested.
 To run from a source checkout without building the optional native extension:
 
 ```bash
-git clone <repository-url> synthermia
+git clone https://github.com/ranearodrigo/Synthermia.git synthermia
 cd synthermia
 python3 -m venv .venv
 source .venv/bin/activate
@@ -21,8 +21,8 @@ python main.py --help
 python main.py examples/glass-steps.mid --range 36:84
 ```
 
-Replace `<repository-url>` with the URL of this repository. The bundled sample
-runs without a SoundFont or audio tools. Omit the MIDI argument to open settings.
+The bundled sample runs without a SoundFont or audio tools. Omit the MIDI
+argument to open settings.
 
 To install the application and native extension from this checkout, install a
 Rust toolchain first, then run `python -m pip install .`. This installs the
@@ -31,6 +31,13 @@ wheel requires Python 3.10+ and does not require Rust:
 
 ```bash
 python -m pip install /path/to/synthermia-0.1.0-*.whl
+synthermia --help
+```
+
+To install directly from GitHub, with Git and Rust installed:
+
+```bash
+python -m pip install git+https://github.com/ranearodrigo/Synthermia.git
 synthermia --help
 ```
 
